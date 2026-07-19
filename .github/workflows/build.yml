@@ -1,0 +1,79 @@
+name: Build release APK
+
+# Manual, phone-driven release job: press "Run workflow", download the signed APK artifact.
+#
+# Signing material never lives in this repository. Two repository secrets feed the build:
+#   LUCENT_KEYSTORE_BASE64    the release keystore file, base64-encoded into text
+#   LUCENT_KEYSTORE_PASSWORD  its password (the same password protects the key inside)
+# The keystore is decoded into the runner's temp directory for the duration of one build and the
+# runner is destroyed afterwards. The key alias is fixed to "lucent".
+#
+# Note for maintainers: an earlier version of this workflow died on
+# `set -euo pipefail` + `yes | sdkmanager --licenses` — when sdkmanager exits, `yes` is killed by
+# SIGPIPE, pipefail turns that into a failing pipeline, and -e aborts the step. This app is pure
+# Kotlin (no NDK/CMake), the runner's preinstalled SDK covers it, so the whole sdkmanager step is
+# gone rather than patched.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        # v6 runs on Node 24 (v4 targeted the now-deprecated Node 20).
+        uses: actions/checkout@v6
+
+      - name: Check signing secrets are configured
+        # Fail in seconds with a plain-language message instead of 10 minutes in with a Gradle
+        # signing stack trace — the most likely first-run mistake is a missing/misnamed secret.
+        env:
+          LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
+          LUCENT_KEYSTORE_PASSWORD: ${{ secrets.LUCENT_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$LUCENT_KEYSTORE_BASE64" ] || [ -z "$LUCENT_KEYSTORE_PASSWORD" ]; then
+            echo "::error::Missing repository secret LUCENT_KEYSTORE_BASE64 and/or LUCENT_KEYSTORE_PASSWORD."
+            echo "::error::Add both under: repository Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+          echo "Both signing secrets are present."
+
+      - name: Set up JDK 17
+        # v5 runs on Node 24.
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        # v6 runs on Node 24. Caching is disabled so transient GitHub cache-service outages can't
+        # surface as "Failed to save/restore cache" build warnings; the trade-off is that
+        # dependencies are re-fetched each run. Set cache-disabled: false to trade those occasional
+        # warnings back for faster builds.
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+
+      - name: Decode release keystore from secret
+        env:
+          LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$LUCENT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/lucent-release.keystore"
+          echo "Keystore decoded to runner temp ($(stat -c%s "$RUNNER_TEMP/lucent-release.keystore") bytes)."
+
+      - name: Build signed release APK
+        env:
+          LUCENT_KEYSTORE_FILE: ${{ runner.temp }}/lucent-release.keystore
+          LUCENT_KEYSTORE_PASSWORD: ${{ secrets.LUCENT_KEYSTORE_PASSWORD }}
+          LUCENT_KEY_ALIAS: lucent
+        run: gradle assembleRelease --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+
+      - name: Upload APK
+        # v6 runs on Node 24 and fixes the punycode deprecation notice from older releases.
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-release-apk
+          path: app/build/outputs/apk/release/*.apk
