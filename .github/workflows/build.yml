@@ -206,6 +206,28 @@ jobs:
           echo "LUCENT_SPIRV_HEADERS_DIR=$CFG_DIR" >> "$GITHUB_ENV"
           echo "SPIRV-Headers config: $CFG_DIR"
 
+      # ggml-vulkan.cpp includes <vulkan/vulkan.hpp> — the C++ Vulkan bindings header. The Android
+      # NDK ships only the C header (vulkan.h), so the compile fails without this. Vulkan-Headers is
+      # header-only and provides vulkan.hpp; we just clone it and hand its include/ dir to the build
+      # (app/build.gradle.kts passes it as Vulkan_INCLUDE_DIR). The NDK's Android libvulkan.so is
+      # still what gets linked — only the headers come from here. Harmless for a -PcpuOnly build.
+      - name: Provide Vulkan-Headers (vulkan.hpp)
+        run: |
+          set -eu
+          SRC="$RUNNER_TEMP/vulkan-headers"
+          for attempt in 1 2 3; do
+            rm -rf "$SRC"
+            if git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers "$SRC"; then break; fi
+            [ "$attempt" = "3" ] && { echo "::error::Failed to clone Vulkan-Headers."; exit 1; }
+            sleep 5
+          done
+          if [ ! -f "$SRC/include/vulkan/vulkan.hpp" ]; then
+            echo "::error::Vulkan-Headers cloned but vulkan.hpp not found."
+            exit 1
+          fi
+          echo "LUCENT_VULKAN_INCLUDE_DIR=$SRC/include" >> "$GITHUB_ENV"
+          echo "Vulkan-Headers include: $SRC/include"
+
       - name: Decode release keystore from secret
         env:
           LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
