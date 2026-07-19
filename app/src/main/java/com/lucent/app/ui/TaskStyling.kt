@@ -41,7 +41,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lucent.app.data.RepeatRule
-import com.lucent.app.data.RepeatRule
 import com.lucent.app.data.TaskPriority
 import com.lucent.app.i18n.S
 import java.time.Instant
