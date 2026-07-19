@@ -16,6 +16,7 @@ import com.lucent.app.network.ApiSpec
 import com.lucent.app.network.ChatTurn
 import com.lucent.app.network.LlmClient
 import com.lucent.app.network.RawModelReply
+import com.lucent.app.network.ToolDefinition
 import com.lucent.app.network.ToolExecResult
 import com.lucent.app.network.ToolImage
 import com.lucent.app.network.ToolResultTurn
@@ -296,6 +297,12 @@ object AssistantController {
         confirmationDeferred = null
         pendingConfirmation = null
 
+        // If the turn is running on the on-device model, flip its stop flag too: the native decode
+        // loop doesn't hit coroutine suspension points, so cancelling the Job alone would let it
+        // keep spending CPU until the token cap. This makes it return within one token (task 1's
+        // "must not lag" also applies to stopping). No-op when nothing local is generating.
+        com.lucent.app.local.LocalLlm.stop()
+
         val convId = activeConversationId
         val ctx = appContextRef
         val partial = synchronized(lock) { buffer.toString() }
@@ -325,7 +332,10 @@ object AssistantController {
         val text: String, val attachmentMime: String?, val attachmentData: String?,
         val attachmentName: String?, val url: String, val spec: ApiSpec, val key: String,
         val model: String, val name: String, val style: String,
-        val memoryTier: MemoryTier, val webSearchEnabled: Boolean, val typingHaptics: Boolean
+        val memoryTier: MemoryTier, val webSearchEnabled: Boolean, val typingHaptics: Boolean,
+        val useLocalModel: Boolean = false,
+        val useLocalTools: Boolean = false,
+        val useLocalGpu: Boolean = false
     )
     private var lastSend: LastSend? = null
 
@@ -341,7 +351,8 @@ object AssistantController {
         send(
             ctx, p.text, p.attachmentMime, p.attachmentData, p.attachmentName, p.url, p.spec,
             p.key, p.model, p.name, p.style, p.memoryTier, p.webSearchEnabled, p.typingHaptics,
-            insertUserMessage = false
+            insertUserMessage = false, useLocalModel = p.useLocalModel,
+            useLocalTools = p.useLocalTools, useLocalGpu = p.useLocalGpu
         )
     }
 
@@ -368,14 +379,18 @@ object AssistantController {
         memoryTier: MemoryTier,
         webSearchEnabled: Boolean,
         typingHapticsEnabled: Boolean = true,
-        insertUserMessage: Boolean = true
+        insertUserMessage: Boolean = true,
+        useLocalModel: Boolean = false,
+        useLocalTools: Boolean = false,
+        useLocalGpu: Boolean = false
     ) {
         if (sending) return
         appContextRef = appContext.applicationContext
         typingHapticsOn = typingHapticsEnabled
         lastSend = LastSend(
             text, attachmentMime, attachmentData, attachmentName, url, spec, key, model,
-            name, style, memoryTier, webSearchEnabled, typingHapticsEnabled
+            name, style, memoryTier, webSearchEnabled, typingHapticsEnabled, useLocalModel,
+            useLocalTools, useLocalGpu
         )
         sending = true
         thinking = true
@@ -422,6 +437,19 @@ object AssistantController {
                             conv.copy(title = newTitle, updatedAt = System.currentTimeMillis())
                         )
                     }
+                }
+
+                // ---- On-device model path (task: local GGUF assistant) ----
+                // Splits off AFTER the user's message is persisted (so the thread is identical in
+                // both modes) and BEFORE anything cloud-shaped is assembled. Everything past this
+                // point in the cloud branch — tools, web search, memory tiers, cross-conversation
+                // digests — is deliberately absent from the local turn: the task pins local mode to
+                // zero configuration and no cross-conversation memory, and a small on-device model
+                // is at its most fluent when it is fed a short, clean prompt rather than a tool
+                // protocol it will imitate badly.
+                if (useLocalModel) {
+                    runLocalTurn(db, conversationId, useLocalTools, useLocalGpu)
+                    return@launch // the shared finally below still resets sending/thinking state
                 }
 
                 // Which stored messages travel to the model this turn is entirely the memory tier's
@@ -596,6 +624,323 @@ object AssistantController {
     }
 
     /**
+     * One full assistant turn on the imported GGUF model (task: local assistant).
+     *
+     * ### What it feeds the model
+     * A tool-aware system prompt plus the tail of THIS conversation only ([LocalLlm.HISTORY_TURNS]
+     * user/assistant pairs). The in-app note/task tools ARE available here (so the local assistant
+     * can create and edit things, exactly like the cloud one); web search and cross-conversation
+     * memory stay off, keeping the model offline-capable and its prompt short. The prompt is English
+     * (models follow English instructions most reliably) but explicitly orders replies in the user's
+     * own language, so a 中文 question gets a 中文 answer.
+     *
+     * ### The tool loop
+     * GGUF models have no native function-calling channel, so tools run over a small text protocol:
+     * the model emits a single JSON object to call a tool, [parseLocalToolCall] extracts it, the
+     * real [AppTools.execute] runs it (mutating calls still pause for the same confirmation modal),
+     * and the result is fed back for the next round — up to [MAX_LOCAL_TOOL_ROUNDS], after which the
+     * model is forced to answer in words. Each round is buffered silently so a raw tool-call JSON
+     * never flashes on screen; only the final written answer is revealed through the typewriter.
+     *
+     * ### Failure surfaces
+     * Everything lands in the existing inline error banner ([errorText]), localized. A Stop press
+     * is not an error: [stopGeneration] already flipped the native stop flag, saved the partial
+     * text with the app's usual " …" suffix, and reset state — so return code 1 simply ends the
+     * turn quietly.
+     */
+    private suspend fun runLocalTurn(db: AppDatabase, conversationId: Long, useTools: Boolean, useGpu: Boolean) {
+        val ctx = appContextRef ?: return
+
+        if (!com.lucent.app.local.LocalLlm.isSupported()) {
+            thinking = false
+            errorText = com.lucent.app.i18n.S.localModelUnsupportedAbi
+            return
+        }
+        if (!com.lucent.app.local.LocalModelStore.hasModel(ctx)) {
+            thinking = false
+            errorText = com.lucent.app.i18n.S.localModelMissing
+            return
+        }
+
+        // Apply the CPU/GPU choice BEFORE loading. ensureLoaded reloads the model if the backend
+        // changed since last time; a failed GPU load quietly falls back to CPU inside LocalLlm.
+        com.lucent.app.local.LocalLlm.setGpuEnabled(useGpu)
+
+        // Load (or re-use) the model. First load of a multi-GB file takes real seconds; the
+        // "thinking" bubble is already showing, which is exactly the right UI for it.
+        val loaded = com.lucent.app.local.LocalLlm.ensureLoaded(ctx)
+        if (!loaded) {
+            thinking = false
+            errorText = com.lucent.app.i18n.S.localModelLoadFailed(com.lucent.app.i18n.S.localModelLoadFailedDetail)
+            return
+        }
+
+        // Tools are opt-in (default off, for phone performance — see the Settings toggle). With them
+        // off this is a plain, fast chat that never spends a round on the tool protocol.
+        if (!useTools) { runLocalChatOnly(db, conversationId); return }
+
+        // The in-app tools (create/read/update/… notes and tasks). Web search is left off on
+        // purpose: local mode is meant to work with no network, and a small model drives the
+        // note/task actions far more reliably than an open-web tool. Cross-conversation memory is
+        // still absent — this turn sees only the tail of THIS chat.
+        val tools = AppTools.definitions(includeWebSearch = false)
+        val validToolNames = tools.map { it.name }.toHashSet()
+
+        // The tail of this conversation, oldest→newest, as plain role/text pairs. Attachments are
+        // text-invisible to a local text model, so only message text travels. The just-sent user
+        // message is already in the table, so it arrives as the final pair entry.
+        val turns = buildHistory(db, conversationId, MemoryTier.MEDIUM)
+            .filter { it.role == "user" || it.role == "assistant" }
+            .map { it.role to it.content }
+            .filter { it.second.isNotBlank() }
+            .takeLast(com.lucent.app.local.LocalLlm.HISTORY_TURNS * 2)
+        val lastUserText = turns.lastOrNull { it.first == "user" }?.second ?: ""
+
+        // The running transcript we re-feed each round. It grows as the model calls tools: the
+        // assistant's tool-call JSON and the tool's result are appended so the next generation can
+        // see what already happened — the same loop the cloud path runs, but over a text protocol
+        // the on-device model can follow (there is no native function-calling channel through GGUF).
+        val messages = mutableListOf<Pair<String, String>>()
+        messages.add("system" to buildLocalSystemPrompt(tools))
+        messages.addAll(turns)
+
+        // Per-turn dedup so the exact same call can't run twice, and the results gathered so far so
+        // an empty final reply can still be turned into an honest summary of what was done.
+        val executed = HashMap<String, ToolExecResult>()
+        val toolResults = mutableListOf<ToolExecResult>()
+        var finalText: String? = null
+
+        var round = 0
+        while (round < MAX_LOCAL_TOOL_ROUNDS) {
+            // Buffer silently: this round's output might be a tool call, which must never flash on
+            // screen as raw JSON. Only the final answer is revealed, at the end.
+            resetStream(reveal = false)
+            thinking = true
+            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> onDelta(piece) }
+            val raw = synchronized(lock) { buffer.toString() }
+
+            if (rc == 1) return                       // Stopped by the user (handled by stopGeneration).
+            if (rc != 0) { thinking = false; errorText = com.lucent.app.i18n.S.localModelGenerateFailed; return }
+
+            val call = parseLocalToolCall(raw, validToolNames)
+            if (call == null) {
+                // Plain prose → this is the final answer.
+                finalText = deRobotify(raw).trim()
+                break
+            }
+
+            // It's a tool call. Clear the buffer now so a Stop landing during the (suspending) tool
+            // execution can't persist the tool-call JSON as if it were a reply.
+            resetStream(reveal = false)
+
+            val sig = signatureOf(call.name, call.argsJson)
+            val result = executed[sig] ?: run {
+                val approved = if (AppTools.isMutating(call.name)) confirmToolCall(call.name, call.argsJson) else true
+                val r = if (!approved) {
+                    ToolExecResult(
+                        "The user was shown a confirmation for this action and DECLINED it, so it was NOT performed. Don't attempt it again; briefly acknowledge you won't do it and ask what they'd like instead.",
+                        success = false
+                    )
+                } else {
+                    thinking = true
+                    AppTools.execute(ctx, db, call.name, call.argsJson)
+                }
+                executed[sig] = r
+                r
+            }
+            toolResults.add(result)
+
+            // Record the exchange for the next round: what the assistant asked, and what came back.
+            messages.add("assistant" to renderLocalToolCall(call))
+            messages.add("tool" to "Result of ${call.name}: ${result.summary}")
+            round++
+        }
+
+        // The model kept calling tools past the cap — ask once more, tools disabled, so it must
+        // produce a written answer now instead of looping forever.
+        if (finalText == null) {
+            resetStream(reveal = false)
+            thinking = true
+            messages.add("system" to "Stop calling tools now and write your final answer to the user, in their language, as plain text. Do not output any JSON.")
+            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> onDelta(piece) }
+            if (rc == 1) return
+            finalText = deRobotify(synchronized(lock) { buffer.toString() }).trim()
+        }
+
+        // Honest final text: the model's own words if it wrote any, otherwise a summary of what the
+        // tools actually did (or a friendly retry line in the user's language) — never a bare "done".
+        val content = replyContent(finalText, hasImage = false, toolResults = toolResults, userText = lastUserText)
+        thinking = false
+        resetStream(reveal = true)
+        finishTyping(content)
+        val tokens = TokenEstimator.estimateAll(messages.map { it.second }) + TokenEstimator.estimate(content)
+        insertAssistant(db, conversationId, content, null, null, tokens)
+        turnPersisted = true
+        if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+    }
+
+    /**
+     * The tools-off local path (the default). A plain chat: a short system prompt with NO tool guide
+     * plus the tail of this conversation, and a single generation streamed straight to the typewriter
+     * — no silent buffering, because with no tools there is never a tool-call JSON that could flash on
+     * screen. This is the fast, low-overhead mode a weak phone gets unless the user opts tools in.
+     */
+    private suspend fun runLocalChatOnly(db: AppDatabase, conversationId: Long) {
+        val turns = buildHistory(db, conversationId, MemoryTier.MEDIUM)
+            .filter { it.role == "user" || it.role == "assistant" }
+            .map { it.role to it.content }
+            .filter { it.second.isNotBlank() }
+            .takeLast(com.lucent.app.local.LocalLlm.HISTORY_TURNS * 2)
+        val lastUserText = turns.lastOrNull { it.first == "user" }?.second ?: ""
+
+        val messages = buildList {
+            add(
+                "system" to (
+                    "You are a helpful assistant living inside Lucent, a personal notes and tasks app. " +
+                    "Always reply in the same language the user writes in. Be concise, warm, and clear. " +
+                    "Write plain conversational text only — never markdown, asterisks, bullet points, or headings."
+                )
+            )
+            addAll(turns)
+        }
+
+        // Arm the typewriter first, then decode: with no tools there is nothing to hide, so the reply
+        // reveals live, the first token swapping the "thinking" bubble for streaming text.
+        resetStream(reveal = true)
+        var first = true
+        val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece ->
+            if (first) { first = false; thinking = false }
+            onDelta(piece)
+        }
+        if (rc == 1) return   // Stopped by the user; stopGeneration saved any partial.
+        if (rc != 0) { thinking = false; errorText = com.lucent.app.i18n.S.localModelGenerateFailed; return }
+
+        val content = replyContent(
+            deRobotify(synchronized(lock) { buffer.toString() }).trim(),
+            hasImage = false, toolResults = emptyList(), userText = lastUserText
+        )
+        thinking = false
+        finishTyping(content)
+        val tokens = TokenEstimator.estimateAll(messages.map { it.second }) + TokenEstimator.estimate(content)
+        insertAssistant(db, conversationId, content, null, null, tokens)
+        turnPersisted = true
+        if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+    }
+
+    /** How many tool rounds the on-device model may take before it is forced to answer in words. */
+    private val MAX_LOCAL_TOOL_ROUNDS = 6
+
+    private data class LocalToolCall(val name: String, val argsJson: String)
+
+    /**
+     * The system prompt for a local tool-using turn: persona, the strict "reply in the user's
+     * language, plain text only" rule, the exact JSON shape a tool call must take, and a compact
+     * catalogue of the available tools. English instructions (models follow them most reliably)
+     * that nonetheless order replies in the user's own language, so a 中文 question gets a 中文 answer.
+     */
+    private fun buildLocalSystemPrompt(tools: List<ToolDefinition>): String {
+        val today = java.time.ZonedDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd, HH:mm"))
+        return buildString {
+            append("You are a helpful assistant living inside Lucent, a personal notes and tasks app. ")
+            append("Always reply in the same language the user writes in. Be concise, warm, and clear. ")
+            append("Write plain conversational text only — never markdown, asterisks, bullet points, or headings.\n\n")
+            append("Right now it is ").append(today).append(" in the user's local time. ")
+            append("Work any concrete date out from this and pass it as an absolute value.\n\n")
+            append("You can act inside the app by calling tools. Only when you actually need to take an action ")
+            append("or look something up, reply with EXACTLY ONE JSON object and nothing else, in this exact form:\n")
+            append("{\"tool\": \"<tool_name>\", \"arguments\": { ... }}\n")
+            append("When calling a tool: output the raw JSON with no code fences and no words before or after it; ")
+            append("use only the tools listed below; include only the arguments you need. ")
+            append("After each tool runs you receive a line beginning \"Result of <tool>:\". ")
+            append("Then either call another tool the same way, or — once the task is done — write your final answer ")
+            append("to the user in their language as plain text (no JSON). ")
+            append("If the user is only chatting and no action is needed, just answer directly with no tool.\n\n")
+            append("Tools:\n")
+            for (t in tools) {
+                val params = t.params.joinToString(", ") { p -> p.name + if (p.required) "*" else "" }
+                append("- ").append(t.name)
+                if (params.isNotEmpty()) append("(").append(params).append(")")
+                append(" — ").append(t.description).append("\n")
+            }
+            append("\n(* = required argument. Booleans are true or false. Dates are \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:mm\".)")
+        }
+    }
+
+    /** Re-serialise a parsed call as compact, well-formed JSON for the assistant turn we feed back. */
+    private fun renderLocalToolCall(call: LocalToolCall): String {
+        val args = try { org.json.JSONObject(call.argsJson) } catch (e: Exception) { org.json.JSONObject() }
+        return org.json.JSONObject().put("tool", call.name).put("arguments", args).toString()
+    }
+
+    /**
+     * Pull a tool call out of a local model's raw output, tolerantly. Small GGUF models phrase tool
+     * calls every which way, so this copes with: a bare JSON object, one wrapped in ``` fences, one
+     * inside <tool_call>…</tool_call>, arguments under any of several key names, and arguments that
+     * arrive double-encoded as a JSON string. A candidate only counts as a call when its tool name
+     * is one that actually exists ([valid]) — so incidental JSON in a normal prose answer is never
+     * mistaken for a call, and plain chat falls straight through to being the final reply.
+     */
+    private fun parseLocalToolCall(raw: String, valid: Set<String>): LocalToolCall? {
+        if (raw.isBlank()) return null
+        var s = raw.trim()
+        Regex("(?s)<tool_call>(.*?)</tool_call>").find(s)?.let { s = it.groupValues[1].trim() }
+        Regex("(?s)```(?:json|tool_call)?\\s*(.*?)```").find(s)?.let { s = it.groupValues[1].trim() }
+
+        for (candidate in jsonObjectCandidates(s)) {
+            val obj = try { org.json.JSONObject(candidate) } catch (e: Exception) { continue }
+            val name = firstJsonString(obj, "tool", "name", "function", "action", "tool_name")?.trim()
+            if (name.isNullOrBlank() || name !in valid) continue
+            val argsObj = firstJsonObject(obj, "arguments", "args", "parameters", "input", "params")
+            return LocalToolCall(name, (argsObj ?: org.json.JSONObject()).toString())
+        }
+        return null
+    }
+
+    /** Every balanced `{…}` object in [s], scanned so braces inside string literals don't fool it. */
+    private fun jsonObjectCandidates(s: String): List<String> {
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < s.length) {
+            if (s[i] != '{') { i++; continue }
+            var depth = 0; var inStr = false; var esc = false; var j = i
+            while (j < s.length) {
+                val c = s[j]
+                if (inStr) {
+                    when {
+                        esc -> esc = false
+                        c == '\\' -> esc = true
+                        c == '"' -> inStr = false
+                    }
+                } else when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> { depth--; if (depth == 0) { out.add(s.substring(i, j + 1)); break } }
+                }
+                j++
+            }
+            i = if (j > i) j + 1 else i + 1
+        }
+        return out
+    }
+
+    private fun firstJsonString(o: org.json.JSONObject, vararg keys: String): String? {
+        for (k in keys) { val v = o.opt(k); if (v is String && v.isNotBlank()) return v }
+        return null
+    }
+
+    private fun firstJsonObject(o: org.json.JSONObject, vararg keys: String): org.json.JSONObject? {
+        for (k in keys) {
+            val v = o.opt(k)
+            if (v is org.json.JSONObject) return v
+            if (v is String && v.trim().startsWith("{")) {
+                try { return org.json.JSONObject(v) } catch (_: Exception) {}
+            }
+        }
+        return null
+    }
+
+    /**
      * Build the message history to send this turn, per the memory tier (issue 9):
      *  - LOW keeps only the message the user just sent (single-turn, cheapest);
      *  - MEDIUM and HIGH send the whole current conversation. (HIGH's cross-conversation context is
@@ -663,11 +1008,11 @@ object AssistantController {
     }
 
     private fun confirmTitleFor(name: String): String = when {
-        name.startsWith("delete_") -> "Move to Trash?"
-        name.startsWith("create_") -> "Create this?"
-        name.startsWith("complete_") -> "Mark as done?"
-        name.contains("remove") -> "Remove this?"
-        else -> "Confirm this action?"
+        name.startsWith("delete_") -> com.lucent.app.i18n.S.confirmMoveTrash
+        name.startsWith("create_") -> com.lucent.app.i18n.S.confirmCreate
+        name.startsWith("complete_") -> com.lucent.app.i18n.S.confirmMarkDone
+        name.contains("remove") -> com.lucent.app.i18n.S.confirmRemove
+        else -> com.lucent.app.i18n.S.confirmGeneric
     }
 
     /**
@@ -732,17 +1077,30 @@ object AssistantController {
     }
 
     /**
-     * The two lines the assistant may have to say when it produced no words itself. English-only
-     * by requirement in this build: the old per-script fallback table (zh/ja/ko/ru/ar) was removed
-     * with the rest of the non-English content. forText keeps its signature so the call site in
-     * replyContent stays untouched.
+     * A tiny per-script set of fallback lines. Not a translation system — just enough that the two
+     * things the assistant may have to say when it produced no words itself land in the language the
+     * user is actually writing, instead of always English, in step with the dynamic-language rule.
+     *
+     * The app ships exactly four locales — English, Chinese, Japanese, Korean — so these cover every
+     * language the product supports and nothing else. Text in any other script falls through to
+     * English, which is the correct behaviour for an unsupported language.
      */
     private data class FallbackPhrases(val image: String, val retry: String) {
         companion object {
             private val EN = FallbackPhrases("Here's the image you asked for.", "Sorry, I didn't quite catch that — could you say it another way?")
+            private val ZH = FallbackPhrases("这是你要的图片。", "抱歉，我没太明白，可以换个说法再说一遍吗？")
+            private val JA = FallbackPhrases("ご希望の画像です。", "ごめんなさい、うまく理解できませんでした。別の言い方でもう一度お願いできますか？")
+            private val KO = FallbackPhrases("요청하신 이미지예요.", "죄송해요, 잘 이해하지 못했어요. 다른 방식으로 다시 말씀해 주시겠어요?")
 
-            @Suppress("UNUSED_PARAMETER")
-            fun forText(text: String): FallbackPhrases = EN
+            fun forText(text: String): FallbackPhrases {
+                for (ch in text) {
+                    val c = ch.code
+                    if (c in 0xAC00..0xD7AF) return KO                        // Hangul
+                    if (c in 0x3040..0x30FF) return JA                        // Kana
+                    if (c in 0x4E00..0x9FFF || c in 0x3400..0x4DBF) return ZH // CJK ideographs
+                }
+                return EN
+            }
         }
     }
 
@@ -798,10 +1156,10 @@ object AssistantController {
     private fun fail(t: Throwable) {
         if (t is java.io.IOException) {
             networkErrorMessage =
-                "Couldn't reach the server. Check your internet connection and try again." +
+                com.lucent.app.i18n.S.networkCantReach +
                     (t.message?.takeIf { it.isNotBlank() && it != "network error" }?.let { "\n\n($it)" } ?: "")
         } else {
-            errorText = "${t.javaClass.simpleName}: ${t.message ?: "no details"}"
+            errorText = "${t.javaClass.simpleName}: ${t.message ?: com.lucent.app.i18n.S.noDetails}"
         }
     }
 

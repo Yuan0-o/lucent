@@ -187,6 +187,11 @@ fun AssistantScreen(active: Boolean = true) {
     val memoryTierKey by repo.memoryTier.collectAsState(initial = MemoryTier.DEFAULT.key)
     val webSearchEnabled by repo.webSearchEnabled.collectAsState(initial = false)
     val typingHapticsEnabled by repo.typingHapticsEnabled.collectAsState(initial = true)
+    // Local-model routing (task: on-device GGUF assistant), read live like the rows above so
+    // flipping the toggle in Settings changes where the very next send goes.
+    val localModelEnabled by repo.localModelEnabled.collectAsState(initial = false)
+    val localToolsEnabled by repo.localToolsEnabled.collectAsState(initial = false)
+    val localGpuEnabled by repo.localGpuEnabled.collectAsState(initial = false)
 
     var input by remember { mutableStateOf("") }
     var localError by remember { mutableStateOf("") }
@@ -418,9 +423,9 @@ fun AssistantScreen(active: Boolean = true) {
                         try { String(bytes, Charsets.UTF_8) } catch (t: Throwable) { null }
                     } else null
                     if (asText != null) {
-                        input = if (input.isBlank()) "[Attached file: $name]\n$asText" else "$input\n\n[Attached file: $name]\n$asText"
+                        input = if (input.isBlank()) "${com.lucent.app.i18n.S.inputAttachedFile(name)}\n$asText" else "$input\n\n${com.lucent.app.i18n.S.inputAttachedFile(name)}\n$asText"
                     } else if (overCap) {
-                        input = if (input.isBlank()) "[Attached file: $name (too large to read here)]" else "$input\n\n[Attached file: $name (too large to read here)]"
+                        input = if (input.isBlank()) com.lucent.app.i18n.S.inputAttachedFileTooLarge(name) else "$input\n\n${com.lucent.app.i18n.S.inputAttachedFileTooLarge(name)}"
                     }
                 }
             }
@@ -488,16 +493,16 @@ fun AssistantScreen(active: Boolean = true) {
     if (showClearConfirm) {
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
-            title = { Text("Delete this conversation?") },
-            text = { Text("This permanently deletes this conversation and its messages. Your other conversations are kept. This can't be undone.") },
+            title = { Text(com.lucent.app.i18n.S.deleteConversationTitle) },
+            text = { Text(com.lucent.app.i18n.S.deleteConversationBodyAll) },
             confirmButton = {
                 TextButton(onClick = {
                     showClearConfirm = false
                     val id = AssistantController.currentConversationId
                     if (id != null) AssistantController.deleteConversation(context.applicationContext, id)
-                }) { Text("Delete") }
+                }) { Text(com.lucent.app.i18n.S.actionDelete) }
             },
-            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text(com.lucent.app.i18n.S.actionCancel) } }
         )
     }
 
@@ -508,7 +513,7 @@ fun AssistantScreen(active: Boolean = true) {
     convoActions?.let { convo ->
         AlertDialog(
             onDismissRequest = { convoActions = null },
-            title = { Text(convo.title.ifBlank { "Conversation" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            title = { Text(convDisplayTitle(convo.title).ifBlank { com.lucent.app.i18n.S.conversationFallback }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -524,7 +529,7 @@ fun AssistantScreen(active: Boolean = true) {
                     ) {
                         Icon(Icons.Default.Edit, contentDescription = null)
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text("Rename")
+                        Text(com.lucent.app.i18n.S.actionRename)
                     }
                     Row(
                         modifier = Modifier
@@ -538,11 +543,11 @@ fun AssistantScreen(active: Boolean = true) {
                     ) {
                         Icon(Icons.Default.Delete, contentDescription = null, tint = OverdueColor)
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text("Delete", color = OverdueColor)
+                        Text(com.lucent.app.i18n.S.actionDelete, color = OverdueColor)
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { convoActions = null }) { Text("Cancel") } }
+            confirmButton = { TextButton(onClick = { convoActions = null }) { Text(com.lucent.app.i18n.S.actionCancel) } }
         )
     }
 
@@ -551,11 +556,10 @@ fun AssistantScreen(active: Boolean = true) {
     convoToDelete?.let { convo ->
         AlertDialog(
             onDismissRequest = { convoToDelete = null },
-            title = { Text("Delete this conversation?") },
+            title = { Text(com.lucent.app.i18n.S.deleteConversationTitle) },
             text = {
                 Text(
-                    "\"${convo.title.ifBlank { "Conversation" }}\" and all of its messages will be " +
-                        "permanently deleted. Your other conversations are kept. This can't be undone."
+                    com.lucent.app.i18n.S.deleteConversationBodyNamed(convDisplayTitle(convo.title).ifBlank { com.lucent.app.i18n.S.conversationFallback })
                 )
             },
             confirmButton = {
@@ -563,9 +567,9 @@ fun AssistantScreen(active: Boolean = true) {
                     val id = convo.id
                     convoToDelete = null
                     AssistantController.deleteConversation(context.applicationContext, id)
-                }) { Text("Delete") }
+                }) { Text(com.lucent.app.i18n.S.actionDelete) }
             },
-            dismissButton = { TextButton(onClick = { convoToDelete = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { convoToDelete = null }) { Text(com.lucent.app.i18n.S.actionCancel) } }
         )
     }
 
@@ -573,12 +577,12 @@ fun AssistantScreen(active: Boolean = true) {
     renameTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { renameTarget = null },
-            title = { Text("Rename conversation") },
+            title = { Text(com.lucent.app.i18n.S.renameConversationTitle) },
             text = {
                 OutlinedTextField(
                     value = renameText,
                     onValueChange = { renameText = it },
-                    label = { Text("Name") },
+                    label = { Text(com.lucent.app.i18n.S.labelName) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -587,9 +591,9 @@ fun AssistantScreen(active: Boolean = true) {
                 TextButton(onClick = {
                     AssistantController.renameConversation(context.applicationContext, target.id, renameText)
                     renameTarget = null
-                }) { Text("Save") }
+                }) { Text(com.lucent.app.i18n.S.actionSave) }
             },
-            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text(com.lucent.app.i18n.S.actionCancel) } }
         )
     }
 
@@ -628,10 +632,10 @@ fun AssistantScreen(active: Boolean = true) {
             title = { Text(confirm.actionTitle) },
             text = { Text(confirm.details) },
             confirmButton = {
-                TextButton(onClick = { AssistantController.resolveConfirmation(true) }) { Text("Confirm") }
+                TextButton(onClick = { AssistantController.resolveConfirmation(true) }) { Text(com.lucent.app.i18n.S.actionConfirm) }
             },
             dismissButton = {
-                TextButton(onClick = { AssistantController.resolveConfirmation(false) }) { Text("Cancel") }
+                TextButton(onClick = { AssistantController.resolveConfirmation(false) }) { Text(com.lucent.app.i18n.S.actionCancel) }
             }
         )
     }
@@ -641,15 +645,15 @@ fun AssistantScreen(active: Boolean = true) {
     networkError?.let { message ->
         AlertDialog(
             onDismissRequest = { AssistantController.clearNetworkError() },
-            title = { Text("Connection problem") },
+            title = { Text(com.lucent.app.i18n.S.connectionProblem) },
             text = { Text(message) },
             confirmButton = {
                 // One-tap recovery (ported from the second assistant variant): re-runs the same
                 // turn without duplicating the already-saved user message.
-                TextButton(onClick = { AssistantController.retryLast() }) { Text("Retry") }
+                TextButton(onClick = { AssistantController.retryLast() }) { Text(com.lucent.app.i18n.S.actionRetry) }
             },
             dismissButton = {
-                TextButton(onClick = { AssistantController.clearNetworkError() }) { Text("OK") }
+                TextButton(onClick = { AssistantController.clearNetworkError() }) { Text(com.lucent.app.i18n.S.actionOk) }
             }
         )
     }
@@ -687,7 +691,7 @@ fun AssistantScreen(active: Boolean = true) {
                     Icon(Icons.Default.Forum, contentDescription = null, tint = onGradient, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        current?.title?.ifBlank { "Conversation" } ?: "New conversation",
+                        current?.title?.let { convDisplayTitle(it) }?.ifBlank { com.lucent.app.i18n.S.conversationFallback } ?: com.lucent.app.i18n.S.newConversation,
                         color = onGradient,
                         fontSize = 14.sp,
                         maxLines = 1,
@@ -698,7 +702,7 @@ fun AssistantScreen(active: Boolean = true) {
                     )
                     Icon(
                         Icons.Default.ArrowDropDown,
-                        contentDescription = "Switch conversation",
+                        contentDescription = com.lucent.app.i18n.S.a11ySwitchConversation,
                         tint = onGradient,
                         // Never let the caret be the thing that gets pushed out of the chip.
                         modifier = Modifier.size(24.dp)
@@ -737,7 +741,7 @@ fun AssistantScreen(active: Boolean = true) {
                             // a row lands on that exact message (switching chats if needed), where it's
                             // highlighted and bounced.
                             if (deepMatches.isEmpty()) {
-                                DropdownMenuItem(text = { Text("No matches") }, onClick = { }, enabled = false)
+                                DropdownMenuItem(text = { Text(com.lucent.app.i18n.S.noMatches) }, onClick = { }, enabled = false)
                             } else {
                                 Column(
                                     modifier = Modifier
@@ -768,7 +772,7 @@ fun AssistantScreen(active: Boolean = true) {
                                             ) {
                                                 Column(modifier = Modifier.weight(1f)) {
                                                     Text(
-                                                        match.conversationTitle.ifBlank { "Conversation" },
+                                                        convDisplayTitle(match.conversationTitle).ifBlank { com.lucent.app.i18n.S.conversationFallback },
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis,
                                                         fontSize = 11.sp,
@@ -800,7 +804,7 @@ fun AssistantScreen(active: Boolean = true) {
                                 }
                             }
                         } else if (convos.isEmpty()) {
-                            DropdownMenuItem(text = { Text("No saved conversations yet") }, onClick = { conversationMenuOpen = false }, enabled = false)
+                            DropdownMenuItem(text = { Text(com.lucent.app.i18n.S.noSavedConversations) }, onClick = { conversationMenuOpen = false }, enabled = false)
                         } else {
                             // ---- Not searching: the conversation switcher (tap switches, long-press renames) ----
                             Column(
@@ -830,7 +834,7 @@ fun AssistantScreen(active: Boolean = true) {
                                                 .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 4.dp)
                                         ) {
                                             Text(
-                                                convo.title.ifBlank { "Conversation" },
+                                                convDisplayTitle(convo.title).ifBlank { com.lucent.app.i18n.S.conversationFallback },
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 color = if (convo.id == AssistantController.currentConversationId) onGradient else onGradientMuted
@@ -848,7 +852,7 @@ fun AssistantScreen(active: Boolean = true) {
                                         ) {
                                             Icon(
                                                 Icons.Default.MoreVert,
-                                                contentDescription = "Options for ${convo.title.ifBlank { "this conversation" }}",
+                                                contentDescription = com.lucent.app.i18n.S.a11yConversationOptions(convo.title.ifBlank { com.lucent.app.i18n.S.thisConversation }),
                                                 tint = onGradientMuted
                                             )
                                         }
@@ -874,16 +878,16 @@ fun AssistantScreen(active: Boolean = true) {
                     },
                     enabled = messages.isNotEmpty()
                 ) {
-                    Icon(Icons.Default.Archive, contentDescription = "Export chat as zip", tint = onGradient)
+                    Icon(Icons.Default.Archive, contentDescription = com.lucent.app.i18n.S.a11yExportChat, tint = onGradient)
                 }
                 IconButton(onClick = { AssistantController.startNewConversation(context.applicationContext) }) {
-                    Icon(Icons.Default.Add, contentDescription = "New conversation", tint = onGradient)
+                    Icon(Icons.Default.Add, contentDescription = com.lucent.app.i18n.S.newConversation, tint = onGradient)
                 }
                 IconButton(
                     onClick = { showClearConfirm = true },
                     enabled = AssistantController.currentConversationId != null && messages.isNotEmpty()
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete this conversation", tint = onGradient)
+                    Icon(Icons.Default.Delete, contentDescription = com.lucent.app.i18n.S.deleteConversationTitle.removeSuffix("?").removeSuffix("？"), tint = onGradient)
                 }
             }
         }
@@ -904,7 +908,7 @@ fun AssistantScreen(active: Boolean = true) {
                         Box(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.align(Alignment.CenterStart).frostedGlass().padding(12.dp)) {
                                 Text(
-                                    "Hi there! I'm your assistant $assistantName. Whether it's learning or expressing your feelings, I will gently accompany you! Feel free to ask me planning questions or share anything happy or unhappy!",
+                                    com.lucent.app.i18n.S.assistantGreeting(assistantName),
                                     color = onGradient
                                 )
                             }
@@ -956,11 +960,11 @@ fun AssistantScreen(active: Boolean = true) {
                                     if (bitmap != null) {
                                         Image(
                                             bitmap = bitmap.asImageBitmap(),
-                                            contentDescription = "Attachment",
+                                            contentDescription = com.lucent.app.i18n.S.a11yAttachment,
                                             modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                                         )
                                     } else {
-                                        Text("[Image unreadable]", color = Color.Red, modifier = Modifier.padding(bottom = 8.dp))
+                                        Text(com.lucent.app.i18n.S.imageUnreadable, color = Color.Red, modifier = Modifier.padding(bottom = 8.dp))
                                     }
                                 } else {
                                     val fileName = msg.attachmentName ?: "image.png"
@@ -976,7 +980,7 @@ fun AssistantScreen(active: Boolean = true) {
                                             .padding(horizontal = 10.dp, vertical = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(Icons.Default.Download, contentDescription = "Download $fileName", tint = onGradient)
+                                        Icon(Icons.Default.Download, contentDescription = com.lucent.app.i18n.S.a11yDownloadFile(fileName), tint = onGradient)
                                         Text(fileName, color = onGradient, fontSize = 13.sp, modifier = Modifier.padding(start = 6.dp))
                                     }
                                 }
@@ -1009,7 +1013,7 @@ fun AssistantScreen(active: Boolean = true) {
                                     onClick = { downloadDialogMsg = msg },
                                     modifier = Modifier.height(28.dp)
                                 ) {
-                                    Icon(Icons.Default.Download, contentDescription = "Download files from this reply", tint = onGradientMuted)
+                                    Icon(Icons.Default.Download, contentDescription = com.lucent.app.i18n.S.a11yDownloadReplyFiles, tint = onGradientMuted)
                                 }
                                 // Approximate token cost of this reply, bottom-right (issue 9). Hidden
                                 // for older replies saved before token tracking (tokens == 0).
@@ -1083,7 +1087,7 @@ fun AssistantScreen(active: Boolean = true) {
                 Icon(Icons.Default.AttachFile, contentDescription = null, tint = onGradientMuted)
                 Text(pendingAttachment?.name ?: "", color = onGradientMuted, modifier = Modifier.weight(1f).padding(start = 4.dp))
                 IconButton(onClick = { pendingAttachment = null }) {
-                    Icon(Icons.Default.Close, contentDescription = "Remove attachment", tint = onGradientMuted)
+                    Icon(Icons.Default.Close, contentDescription = com.lucent.app.i18n.S.a11yRemoveAttachment, tint = onGradientMuted)
                 }
             }
         }
@@ -1092,12 +1096,12 @@ fun AssistantScreen(active: Boolean = true) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = { filePickerLauncher.launch("*/*") }, modifier = Modifier.height(56.dp)) {
-                Icon(Icons.Default.AttachFile, contentDescription = "Attach file", tint = onGradient)
+                Icon(Icons.Default.AttachFile, contentDescription = com.lucent.app.i18n.S.a11yAttachFile, tint = onGradient)
             }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                placeholder = { Text("Message", fontSize = 13.sp) },
+                placeholder = { Text(com.lucent.app.i18n.S.messagePlaceholder, fontSize = 13.sp) },
                 singleLine = true,
                 textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
                 modifier = Modifier.weight(1f).height(56.dp)
@@ -1110,7 +1114,7 @@ fun AssistantScreen(active: Boolean = true) {
                     modifier = Modifier.height(56.dp),
                     onClick = { AssistantController.stopGeneration() }
                 ) {
-                    Icon(Icons.Default.Stop, contentDescription = "Stop generating", tint = onGradient)
+                    Icon(Icons.Default.Stop, contentDescription = com.lucent.app.i18n.S.a11yStopGenerating, tint = onGradient)
                 }
             } else {
                 IconButton(
@@ -1119,8 +1123,13 @@ fun AssistantScreen(active: Boolean = true) {
                         val text = input.trim()
                         val attachment = pendingAttachment
                         if (text.isBlank() && attachment == null) return@IconButton
-                        if (savedUrl.isBlank() || savedModel.isBlank()) {
-                            localError = "Set up your API endpoint and model in Settings first."
+                        // Local mode replaces the whole cloud configuration (task: zero
+                        // setup): with it on and a model imported, no URL/key/model is needed —
+                        // so this guard only applies to the cloud path.
+                        val useLocal = localModelEnabled &&
+                            com.lucent.app.local.LocalModelStore.hasModel(context)
+                        if (!useLocal && (savedUrl.isBlank() || savedModel.isBlank())) {
+                            localError = com.lucent.app.i18n.S.setupApiFirst
                             return@IconButton
                         }
                         input = ""
@@ -1142,11 +1151,14 @@ fun AssistantScreen(active: Boolean = true) {
                             name = assistantName, style = assistantStyle,
                             memoryTier = MemoryTier.fromKey(memoryTierKey),
                             webSearchEnabled = webSearchEnabled,
-                            typingHapticsEnabled = typingHapticsEnabled
+                            typingHapticsEnabled = typingHapticsEnabled,
+                            useLocalModel = useLocal,
+                            useLocalTools = localToolsEnabled,
+                            useLocalGpu = localGpuEnabled
                         )
                     }
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = onGradient)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = com.lucent.app.i18n.S.a11ySend, tint = onGradient)
                 }
             }
         }
@@ -1187,7 +1199,7 @@ private fun JumpToLatestButton(
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Jump to latest", tint = tint)
+            Icon(Icons.Default.KeyboardArrowDown, contentDescription = com.lucent.app.i18n.S.a11yJumpToLatest, tint = tint)
         }
     }
 }
@@ -1201,7 +1213,7 @@ private fun JumpToLatestButton(
 private fun ThinkingBubble(name: String, tint: Color, mutedTint: Color) {
     val transition = rememberInfiniteTransition(label = "thinking")
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("$name is thinking", color = mutedTint, fontSize = 13.sp)
+        Text(com.lucent.app.i18n.S.thinkingIndicator(name), color = mutedTint, fontSize = 13.sp)
         Spacer(modifier = Modifier.width(4.dp))
         for (i in 0 until 3) {
             val dotAlpha by transition.animateFloat(
@@ -1249,10 +1261,10 @@ private fun DownloadFilesDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Download files") },
+        title = { Text(com.lucent.app.i18n.S.downloadFilesTitle) },
         text = {
             Column {
-                Text("Choose which files to download.", fontSize = 13.sp)
+                Text(com.lucent.app.i18n.S.downloadChoose, fontSize = 13.sp)
                 Spacer(modifier = Modifier.height(8.dp))
                 if (hasText) {
                     Row(
@@ -1260,7 +1272,7 @@ private fun DownloadFilesDialog(
                         modifier = Modifier.fillMaxWidth().clickable { selText = !selText }
                     ) {
                         Checkbox(checked = selText, onCheckedChange = { selText = it })
-                        Text("Reply text (.txt)")
+                        Text(com.lucent.app.i18n.S.downloadReplyTxt)
                     }
                 }
                 if (hasAttachment) {
@@ -1269,11 +1281,11 @@ private fun DownloadFilesDialog(
                         modifier = Modifier.fillMaxWidth().clickable { selAtt = !selAtt }
                     ) {
                         Checkbox(checked = selAtt, onCheckedChange = { selAtt = it })
-                        Text(attName ?: "Attachment", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(attName ?: com.lucent.app.i18n.S.a11yAttachment, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 if (!hasText && !hasAttachment) {
-                    Text("This reply has no files to download.", fontSize = 13.sp)
+                    Text(com.lucent.app.i18n.S.downloadNone, fontSize = 13.sp)
                 }
             }
         },
@@ -1296,9 +1308,9 @@ private fun DownloadFilesDialog(
                         else -> onSaveZip(entries)
                     }
                 }
-            ) { Text("Download") }
+            ) { Text(com.lucent.app.i18n.S.actionDownload) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(com.lucent.app.i18n.S.actionCancel) } }
     )
 }
 
@@ -1314,7 +1326,7 @@ private fun buildChatExportEntries(messages: List<ChatMessage>, assistantName: S
     val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
     var attIndex = 1
     messages.forEach { m ->
-        val who = if (m.role == "assistant") assistantName else "You"
+        val who = if (m.role == "assistant") assistantName else com.lucent.app.i18n.S.exportYou
         val time = fmt.format(java.util.Date(m.timestamp))
         sb.append("[").append(time).append("] ").append(who).append(":\n")
         sb.append(m.content).append("\n")
@@ -1334,3 +1346,15 @@ private fun buildChatExportEntries(messages: List<ChatMessage>, assistantName: S
 
 private fun sanitizeExportName(name: String): String =
     name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "file" }
+
+/**
+ * Display mapping for a stored conversation title (localization task).
+ *
+ * A conversation is PERSISTED with the English sentinel "New conversation" until its first reply
+ * earns it a real name (AssistantController auto-titles on that exact string — see its comparison
+ * at newTitle). The sentinel must therefore stay English in the database; this maps it to the
+ * catalog only at the moment it is shown, so a fresh conversation reads as the translated
+ * phrase in Japanese while the auto-title logic keeps matching what is actually stored.
+ */
+private fun convDisplayTitle(title: String): String =
+    if (title == "New conversation") com.lucent.app.i18n.S.newConversation else title

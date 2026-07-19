@@ -34,7 +34,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -64,11 +63,16 @@ import androidx.compose.ui.unit.sp
 import com.lucent.app.AppScope
 import com.lucent.app.data.AppDatabase
 import com.lucent.app.data.AppLock
+import com.lucent.app.data.AttachmentLimits
 import com.lucent.app.data.BackupManager
 import com.lucent.app.data.MemoryTier
 import com.lucent.app.data.SettingsRepository
 import com.lucent.app.data.ShareIntegration
 import com.lucent.app.data.StartupLog
+import com.lucent.app.i18n.AppLanguage
+import com.lucent.app.i18n.S
+import com.lucent.app.local.LocalLlm
+import com.lucent.app.local.LocalModelStore
 import com.lucent.app.network.ApiSpec
 import com.lucent.app.network.LlmClient
 import dev.chrisbanes.haze.hazeSource
@@ -87,7 +91,15 @@ import kotlinx.coroutines.withContext
 // Those are different questions asked by different worries, and a single page called "Security and
 // Privacy" answered neither of them clearly. Splitting them also gives each page room to grow
 // without becoming the drawer where every remaining switch is kept.
-private enum class SettingsRoute { Root, Assistant, Personalization, Memory, Api, Appearance, Theme, Background, Font, Editor, Security, Privacy, Data }
+//
+// Two routes arrived with the localization / local-model round:
+//   - Language: the in-app UI language picker (system / en / zh / ja / ko). It sits directly after
+//     Appearance at the root, because "what language is this in" is the same kind of question as
+//     "what does this look like".
+//   - LocalModel: the on-device GGUF assistant — import, enable, inspect, delete. It lives under
+//     Assistant beside API and Memory, because it IS an assistant backend: the fourth answer to
+//     "where do replies come from".
+private enum class SettingsRoute { Root, Language, Assistant, Personalization, Memory, Api, LocalModel, Appearance, Theme, Background, Font, Editor, Security, Privacy, Data }
 
 /** Which kind of item the selective Markdown-export picker is currently choosing. */
 private enum class ExportKind { NOTES, TASKS }
@@ -121,6 +133,12 @@ fun SettingsScreen(active: Boolean = true) {
     // Editor: whether links are active (task 3). A sub-toggle of Markdown — only live when both are
     // on. Defaults to on.
     val linksEnabled by repo.linksEnabled.collectAsState(initial = true)
+    // The in-app UI language (localization task). "system" resolves against the device locale.
+    val savedLanguage by repo.appLanguage.collectAsState(initial = "system")
+    // Whether the assistant answers with the imported on-device model (local-model task).
+    val localModelEnabled by repo.localModelEnabled.collectAsState(initial = false)
+    val localToolsEnabled by repo.localToolsEnabled.collectAsState(initial = false)
+    val localGpuEnabled by repo.localGpuEnabled.collectAsState(initial = false)
 
     // Working copies of the *active* profile's connection fields, used by the API editor page.
     // These mirror the flat saved values; the API page saves through saveApiProfiles (which also
@@ -189,7 +207,7 @@ fun SettingsScreen(active: Boolean = true) {
                         false
                     }
                 }
-                backupStatus = if (ok) "Logs exported." else "Couldn't export the logs."
+                backupStatus = if (ok) S.logsExported else S.logsExportFailed
             }
         }
     }
@@ -216,6 +234,14 @@ fun SettingsScreen(active: Boolean = true) {
     // DatabaseEncryption.setAside — but the user has to be told, and told what to do about it.
     val lockedNotice = remember { com.lucent.app.data.DatabaseEncryption.lockedNotice(context) }
     var lockedDismissed by remember { mutableStateOf(false) }
+    // The notice is *persisted at fault time* (see DatabaseEncryption.setAside), so an old marker
+    // may be in English while the UI is not. The set-aside file name is the only variable part and
+    // is always written inside double quotes, so it is extracted here and re-rendered through the
+    // catalog; if extraction ever fails (foreign/edited marker), the stored text is shown verbatim
+    // rather than nothing — a recovery notice must never be lost to a formatting quibble.
+    val lockedNoticeFileName = remember(lockedNotice) {
+        lockedNotice?.let { Regex("\"([^\"]+)\"").find(it)?.groupValues?.getOrNull(1) }
+    }
     var showClearData by remember { mutableStateOf(false) }
     var showClearNotes by remember { mutableStateOf(false) }
     var showClearTasks by remember { mutableStateOf(false) }
@@ -227,6 +253,58 @@ fun SettingsScreen(active: Boolean = true) {
     // Name of the profile being edited on the API page (editable so users can rename).
     var editingProfileName by remember(savedProfilesJson, selectedProfileIdx) {
         mutableStateOf(profiles.getOrNull(selectedProfileIdx)?.name ?: "API 1")
+    }
+
+    // --- Local model (GGUF) page state (local-model task) ---
+    //
+    // lmRefresh is a change counter: bumping it makes the remember()s below re-read the store, so
+    // the page reflects an import/delete immediately without any second source of truth.
+    var lmRefresh by remember { mutableStateOf(0) }
+    val lmHasModel = remember(lmRefresh) { LocalModelStore.hasModel(context) }
+    val lmModelName = remember(lmRefresh) { LocalModelStore.displayName(context) }
+    val lmModelSize = remember(lmRefresh) {
+        AttachmentLimits.formatBytes(LocalModelStore.modelSizeBytes(context))
+    }
+    var lmImporting by remember { mutableStateOf(false) }
+    var lmError by remember { mutableStateOf("") }
+    var lmConfirmDelete by remember { mutableStateOf(false) }
+    // Warning dialogs for the two opt-in local-model switches (tools, GPU). Turning either ON asks
+    // first; turning OFF is free (back to the safe default), so only the "on" path is gated.
+    var lmConfirmToolsOn by remember { mutableStateOf(false) }
+    var lmConfirmGpuOn by remember { mutableStateOf(false) }
+
+    // The GGUF picker. OpenDocument with * / * because .gguf has no registered MIME type and a
+    // model downloaded as a .zip must be pickable too; LocalModelStore validates the actual bytes
+    // (GGUF magic, or a zip containing a .gguf) and rejects everything else with a clear message.
+    val lmImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null && !lmImporting) {
+            lmImporting = true
+            lmError = ""
+            scope.launch {
+                val error = withContext(Dispatchers.IO) {
+                    try {
+                        // Replacing a loaded model: free the old one's memory *before* the new
+                        // bytes land, so the peak footprint is one model, not two.
+                        LocalLlm.shutdown()
+                        LocalModelStore.import(context, uri)
+                        null
+                    } catch (e: LocalModelStore.NotGgufException) {
+                        S.lmImportFailedNotGguf
+                    } catch (e: LocalModelStore.NoGgufInZipException) {
+                        S.lmImportFailedNoGgufInZip
+                    } catch (e: Exception) {
+                        S.lmImportFailedGeneric(e.message ?: "")
+                    }
+                }
+                lmImporting = false
+                if (error == null) {
+                    lmRefresh++
+                    LucentToast.show(context.applicationContext, S.lmImportedToast)
+                } else {
+                    lmError = error
+                }
+            }
+        }
     }
 
     var route by rememberSaveable { mutableStateOf(SettingsRoute.Root) }
@@ -248,7 +326,7 @@ fun SettingsScreen(active: Boolean = true) {
             repo.setAssistantName(assistantName.ifBlank { "Lucent" })
             repo.setAssistantStyle(assistantStyle)
             withContext(Dispatchers.Main) {
-                LucentToast.show(appContext, "Saved")
+                LucentToast.show(appContext, S.savedToast)
             }
         }
     }
@@ -261,6 +339,11 @@ fun SettingsScreen(active: Boolean = true) {
     // Saves the currently-edited connection fields into profile [idx] (replacing it) and makes it
     // active. Used by the API editor's Save button. Runs on the app-lifetime scope for the same
     // reason as above.
+    //
+    // The persisted fallback name deliberately stays the English "API N" pattern:
+    // ApiProfiles.nextDefaultName generates the same pattern at the data layer, and a stored name
+    // should not depend on which language happened to be active the moment Save was pressed.
+    // Display-side fallbacks (list rows, the delete dialog) ARE localized.
     fun saveActiveProfile(idx: Int, activate: Boolean = true) {
         val updated = profiles.toMutableList()
         val edited = com.lucent.app.data.ApiProfile(
@@ -274,7 +357,7 @@ fun SettingsScreen(active: Boolean = true) {
         val newSelected = if (activate) idx.coerceIn(0, updated.size - 1) else selectedProfileIdx
         AppScope.io.launch {
             repo.saveApiProfiles(updated, newSelected)
-            withContext(Dispatchers.Main) { LucentToast.show(appContext, "API saved") }
+            withContext(Dispatchers.Main) { LucentToast.show(appContext, S.apiSavedToast) }
         }
     }
 
@@ -316,14 +399,16 @@ fun SettingsScreen(active: Boolean = true) {
     }
 
     // Where "back" goes from the current sub-route, reflecting the nesting:
-    //   Assistant > { Personalization, API, Memory & web }   and   Appearance > { Theme, Background, Font }
+    //   Assistant > { Personalization, API, Memory & web, Local model }
+    //   Appearance > { Theme, Background, Font }
     fun goBack() {
         when (route) {
             SettingsRoute.Personalization -> leavePersonalization()
             SettingsRoute.Memory -> route = SettingsRoute.Assistant
             SettingsRoute.Api -> route = SettingsRoute.Assistant
+            SettingsRoute.LocalModel -> route = SettingsRoute.Assistant
             SettingsRoute.Theme, SettingsRoute.Background, SettingsRoute.Font -> route = SettingsRoute.Appearance
-            SettingsRoute.Assistant, SettingsRoute.Appearance, SettingsRoute.Editor,
+            SettingsRoute.Language, SettingsRoute.Assistant, SettingsRoute.Appearance, SettingsRoute.Editor,
             SettingsRoute.Security, SettingsRoute.Privacy, SettingsRoute.Data -> route = SettingsRoute.Root
             else -> route = SettingsRoute.Root
         }
@@ -352,14 +437,14 @@ fun SettingsScreen(active: Boolean = true) {
     if (showUnsavedDialog) {
         AlertDialog(
             onDismissRequest = { showUnsavedDialog = false },
-            title = { Text("Unsaved changes") },
-            text = { Text("You have unsaved changes to your assistant settings. Save them before leaving?") },
+            title = { Text(S.unsavedChangesTitle) },
+            text = { Text(S.settingsUnsavedBody) },
             confirmButton = {
                 TextButton(onClick = {
                     persistAssistantSettings()
                     showUnsavedDialog = false
                     route = SettingsRoute.Assistant
-                }) { Text("Save") }
+                }) { Text(S.actionSave) }
             },
             dismissButton = {
                 Row {
@@ -367,8 +452,8 @@ fun SettingsScreen(active: Boolean = true) {
                         discardAssistantSettings()
                         showUnsavedDialog = false
                         route = SettingsRoute.Assistant
-                    }) { Text("Discard") }
-                    TextButton(onClick = { showUnsavedDialog = false }) { Text("Cancel") }
+                    }) { Text(S.actionDiscard) }
+                    TextButton(onClick = { showUnsavedDialog = false }) { Text(S.actionCancel) }
                 }
             }
         )
@@ -440,14 +525,14 @@ fun SettingsScreen(active: Boolean = true) {
                     try {
                         context.contentResolver.openOutputStream(uri)?.use { out ->
                             BackupManager.exportEncrypted(context, db, repo, out, password)
-                        } ?: return@withContext "Couldn't write to that file."
+                        } ?: return@withContext S.backupWriteFailed
                         if (password.isNullOrEmpty()) {
-                            "Encrypted backup saved, using Lucent's built-in key."
+                            S.backupSavedBuiltIn
                         } else {
-                            "Encrypted backup saved, protected by your password. Don't lose it."
+                            S.backupSavedPassword
                         }
                     } catch (e: Exception) {
-                        "Export failed: ${e.message}"
+                        S.exportFailed(e.message ?: "")
                     }
                 }
                 backupStatus = result
@@ -472,34 +557,21 @@ fun SettingsScreen(active: Boolean = true) {
     if (showExportDialog) {
         AlertDialog(
             onDismissRequest = { showExportDialog = false },
-            title = { Text("Export backup") },
+            title = { Text(S.exportBackupTitle) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text(
-                        "Everything goes into one encrypted .lcb file — notes, tasks, version history, " +
-                            "chats, attachments, and settings. By default it's locked with Lucent's " +
-                            "built-in key, which means it restores on ANY device with nothing but the " +
-                            "file. Leave the password blank for that.",
-                        fontSize = 13.sp
-                    )
+                    Text(S.exportBackupBody, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    Text("Add a password (optional)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(S.addPasswordOptional, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        "A password gives stronger protection: the key is derived from it and exists " +
-                            "nowhere else, so not even someone holding the app can open the file. The " +
-                            "trade-off is that you must type the SAME password to restore it on another " +
-                            "device — it isn't saved anywhere else, and a forgotten one can't be " +
-                            "recovered. Leave this blank unless you want that.",
-                        fontSize = 13.sp
-                    )
+                    Text(S.exportPasswordExplain, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(16.dp))
 
                     OutlinedTextField(
                         value = exportPasswordDraft,
                         onValueChange = { exportPasswordDraft = it },
-                        label = { Text("Password (optional)") },
+                        label = { Text(S.fieldPasswordOptional) },
                         singleLine = true,
                         visualTransformation = if (exportPasswordVisible) VisualTransformation.None
                             else PasswordVisualTransformation(),
@@ -507,7 +579,7 @@ fun SettingsScreen(active: Boolean = true) {
                             IconButton(onClick = { exportPasswordVisible = !exportPasswordVisible }) {
                                 Icon(
                                     if (exportPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (exportPasswordVisible) "Hide password" else "Show password"
+                                    contentDescription = if (exportPasswordVisible) S.hidePassword else S.showPassword
                                 )
                             }
                         },
@@ -528,10 +600,10 @@ fun SettingsScreen(active: Boolean = true) {
                         }
                         beginExport(password)
                     }
-                ) { Text("Export") }
+                ) { Text(S.actionExport) }
             },
             dismissButton = {
-                TextButton(onClick = { showExportDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showExportDialog = false }) { Text(S.actionCancel) }
             }
         )
     }
@@ -562,7 +634,7 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                 }
                 if (bytes == null) {
-                    backupStatus = "Could not read that file."
+                    backupStatus = S.couldNotReadThatFile
                     return@launch
                 }
 
@@ -595,7 +667,7 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                     result.fold(
                         onSuccess = { importPreview = it },
-                        onFailure = { backupStatus = "Import failed: ${it.message}" }
+                        onFailure = { backupStatus = S.importFailed(it.message ?: "") }
                     )
                 }
             }
@@ -606,14 +678,10 @@ fun SettingsScreen(active: Boolean = true) {
     pendingImportBytes?.let { bytes ->
         AlertDialog(
             onDismissRequest = { pendingImportBytes = null },
-            title = { Text("Backup password") },
+            title = { Text(S.backupPasswordTitle) },
             text = {
                 Column {
-                    Text(
-                        "This backup was protected with a password when it was exported. " +
-                            "Enter it to see what's inside.",
-                        fontSize = 13.sp
-                    )
+                    Text(S.backupPasswordBody, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = importPasswordDraft,
@@ -621,7 +689,7 @@ fun SettingsScreen(active: Boolean = true) {
                         singleLine = true,
                         isError = importPasswordError,
                         visualTransformation = PasswordVisualTransformation(),
-                        label = { Text(if (importPasswordError) "Wrong password" else "Password") },
+                        label = { Text(if (importPasswordError) S.wrongPassword else S.lockPassword) },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -652,15 +720,15 @@ fun SettingsScreen(active: Boolean = true) {
                                         importPasswordError = true
                                     } else {
                                         pendingImportBytes = null
-                                        backupStatus = "Import failed: ${error.message}"
+                                        backupStatus = S.importFailed(error.message ?: "")
                                     }
                                 }
                             )
                         }
                     }
-                ) { Text("Continue") }
+                ) { Text(S.lockContinue) }
             },
-            dismissButton = { TextButton(onClick = { pendingImportBytes = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { pendingImportBytes = null }) { Text(S.actionCancel) } }
         )
     }
 
@@ -668,48 +736,44 @@ fun SettingsScreen(active: Boolean = true) {
     importPreview?.let { preview ->
         AlertDialog(
             onDismissRequest = { importPreview = null },
-            title = { Text("Restore this backup?") },
+            title = { Text(S.restoreBackupTitle) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                     preview.exportedAt?.let {
-                        Text("Exported ${formatTimestamp(it)}", fontSize = 13.sp)
+                        Text(S.exportedWhen(formatTimestamp(it)), fontSize = 13.sp)
                         Spacer(modifier = Modifier.height(2.dp))
                     }
                     Text(
-                        if (preview.passwordProtected) "Protected with your password."
-                        else "Encrypted with Lucent's built-in key.",
+                        if (preview.passwordProtected) S.protectedByPassword
+                        else S.protectedBuiltIn,
                         fontSize = 13.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
                     if (preview.isEmpty) {
-                        Text("This backup appears to be empty.", fontSize = 13.sp)
+                        Text(S.backupEmpty, fontSize = 13.sp)
                     } else {
-                        Text("It contains:", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text(S.backupContains, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(modifier = Modifier.height(6.dp))
-                        BackupContentLine("Notes", preview.notes, buildList {
-                            if (preview.archivedNotes > 0) add("${preview.archivedNotes} archived")
-                            if (preview.trashedNotes > 0) add("${preview.trashedNotes} in trash")
+                        BackupContentLine(S.bkNotes, preview.notes, buildList {
+                            if (preview.archivedNotes > 0) add(S.bkNArchived(preview.archivedNotes))
+                            if (preview.trashedNotes > 0) add(S.bkNInTrash(preview.trashedNotes))
                         })
-                        BackupContentLine("Tasks", preview.tasks, buildList {
-                            if (preview.completedTasks > 0) add("${preview.completedTasks} completed")
-                            if (preview.trashedTasks > 0) add("${preview.trashedTasks} in trash")
+                        BackupContentLine(S.bkTasks, preview.tasks, buildList {
+                            if (preview.completedTasks > 0) add(S.bkNCompleted(preview.completedTasks))
+                            if (preview.trashedTasks > 0) add(S.bkNInTrash(preview.trashedTasks))
                         })
-                        BackupContentLine("Note versions", preview.noteVersions, emptyList())
-                        BackupContentLine("Conversations", preview.conversations, emptyList())
-                        BackupContentLine("Chat messages", preview.chatMessages, emptyList())
-                        BackupContentLine("Attachments", preview.attachments, emptyList())
+                        BackupContentLine(S.bkNoteVersions, preview.noteVersions, emptyList())
+                        BackupContentLine(S.bkConversations, preview.conversations, emptyList())
+                        BackupContentLine(S.bkChatMessages, preview.chatMessages, emptyList())
+                        BackupContentLine(S.bkAttachments, preview.attachments, emptyList())
                         if (preview.hasSettings) {
-                            BackupContentLine("Settings", 1, listOf("including your API keys"))
+                            BackupContentLine(S.bkSettings, 1, listOf(S.bkIncludingApiKeys))
                         }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        "Restoring adds these to what you already have — nothing currently on this " +
-                            "device is deleted. Anything identical is skipped rather than duplicated.",
-                        fontSize = 13.sp
-                    )
+                    Text(S.restoreMergeNote, fontSize = 13.sp)
                 }
             },
             confirmButton = {
@@ -722,7 +786,7 @@ fun SettingsScreen(active: Boolean = true) {
                                 try {
                                     BackupManager.commit(context, db, repo, preview)
                                 } catch (e: Exception) {
-                                    "Import failed: ${e.message}"
+                                    S.importFailed(e.message ?: "")
                                 }
                             }
                             // A restored backup can bring in tasks that want reminders, and alarms
@@ -735,9 +799,9 @@ fun SettingsScreen(active: Boolean = true) {
                             com.lucent.app.data.DatabaseEncryption.clearLockedNotice(context)
                         }
                     }
-                ) { Text("Restore") }
+                ) { Text(S.actionRestore) }
             },
-            dismissButton = { TextButton(onClick = { importPreview = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { importPreview = null }) { Text(S.actionCancel) } }
         )
     }
 
@@ -759,27 +823,21 @@ fun SettingsScreen(active: Boolean = true) {
         lockPw = ""; lockPwConfirm = ""; lockQuestion = ""; lockAnswer = ""
         lockSetupError = ""
         showAppLockSetup = false
-        LucentToast.show(context, "App lock is on.")
+        LucentToast.show(context, S.appLockOnToast)
     }
 
     if (showAppLockSetup) {
         AlertDialog(
             onDismissRequest = { showAppLockSetup = false },
-            title = { Text("Set up app lock") },
+            title = { Text(S.appLockSetupTitle) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text(
-                        "Choose a password you'll enter each time Lucent opens. The security question is " +
-                            "optional, but it is the only way to reset the password if you forget it. " +
-                            "Neither the password nor the answer is stored — only a salted hash — so if " +
-                            "you forget BOTH, the only way back in is to clear all data.",
-                        fontSize = 13.sp
-                    )
+                    Text(S.appLockSetupBody, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
                         value = lockPw,
                         onValueChange = { lockPw = it; lockSetupError = "" },
-                        label = { Text("Password") },
+                        label = { Text(S.lockPassword) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
@@ -788,7 +846,7 @@ fun SettingsScreen(active: Boolean = true) {
                     OutlinedTextField(
                         value = lockPwConfirm,
                         onValueChange = { lockPwConfirm = it; lockSetupError = "" },
-                        label = { Text("Confirm password") },
+                        label = { Text(S.fieldConfirmPassword) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
@@ -797,7 +855,7 @@ fun SettingsScreen(active: Boolean = true) {
                     OutlinedTextField(
                         value = lockQuestion,
                         onValueChange = { lockQuestion = it; lockSetupError = "" },
-                        label = { Text("Security question (optional)") },
+                        label = { Text(S.fieldSecurityQuestionOptional) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -805,7 +863,7 @@ fun SettingsScreen(active: Boolean = true) {
                     OutlinedTextField(
                         value = lockAnswer,
                         onValueChange = { lockAnswer = it; lockSetupError = "" },
-                        label = { Text("Answer (optional)") },
+                        label = { Text(S.fieldAnswerOptional) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -818,25 +876,25 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 Button(onClick = {
                     when {
-                        lockPw.length < 4 -> lockSetupError = "Use a password of at least 4 characters."
-                        lockPw != lockPwConfirm -> lockSetupError = "The passwords don't match."
+                        lockPw.length < 4 -> lockSetupError = S.lockErrTooShort
+                        lockPw != lockPwConfirm -> lockSetupError = S.lockErrMismatch
                         // Half a security question is still an error: a question with no answer can
                         // never be verified, and an answer with no question can never be asked.
                         lockQuestion.isNotBlank() && lockAnswer.isBlank() ->
-                            lockSetupError = "Enter an answer to your security question."
+                            lockSetupError = S.lockErrNeedAnswer
                         lockAnswer.isNotBlank() && lockQuestion.isBlank() ->
-                            lockSetupError = "Enter the question this answer belongs to."
+                            lockSetupError = S.lockErrNeedQuestion
                         // Both blank: allowed, but only after the user has been told what it costs.
                         lockQuestion.isBlank() && lockAnswer.isBlank() -> showNoRecoveryWarning = true
                         else -> applyAppLock()
                     }
-                }) { Text("Turn on") }
+                }) { Text(S.turnOn) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     lockPw = ""; lockPwConfirm = ""; lockQuestion = ""; lockAnswer = ""
                     showAppLockSetup = false
-                }) { Text("Cancel") }
+                }) { Text(S.actionCancel) }
             }
         )
     }
@@ -855,24 +913,16 @@ fun SettingsScreen(active: Boolean = true) {
     if (showNoRecoveryWarning) {
         AlertDialog(
             onDismissRequest = { showNoRecoveryWarning = false },
-            title = { Text("Turn on without a way to reset it?") },
-            text = {
-                Text(
-                    "Without a security question there is no password reset. If you forget this " +
-                        "password, the only way back into Lucent is to clear all data — every note, " +
-                        "task, attachment and conversation on this device, permanently. Nobody, " +
-                        "including Anthropic or the app itself, can recover it for you, because the " +
-                        "password is never stored anywhere."
-                )
-            },
+            title = { Text(S.noRecoveryTitle) },
+            text = { Text(S.noRecoveryBody) },
             confirmButton = {
                 Button(onClick = {
                     showNoRecoveryWarning = false
                     applyAppLock()
-                }) { Text("Turn on anyway") }
+                }) { Text(S.turnOnAnyway) }
             },
             dismissButton = {
-                TextButton(onClick = { showNoRecoveryWarning = false }) { Text("Add a question") }
+                TextButton(onClick = { showNoRecoveryWarning = false }) { Text(S.addAQuestion) }
             }
         )
     }
@@ -881,16 +931,8 @@ fun SettingsScreen(active: Boolean = true) {
     if (showShareWarning) {
         AlertDialog(
             onDismissRequest = { showShareWarning = false },
-            title = { Text("Make Lucent a share target?") },
-            text = {
-                Text(
-                    "This makes Lucent appear in other apps' share sheets so you can send text and files " +
-                        "into it. It's the one place Lucent becomes visible to other apps. Anything you " +
-                        "choose to share INTO Lucent is copied into your encrypted database like any other " +
-                        "note or task; Lucent still sends nothing out on its own. You can turn this off " +
-                        "again at any time, and it's off until you confirm."
-                )
-            },
+            title = { Text(S.shareWarnTitle) },
+            text = { Text(S.shareWarnBody) },
             confirmButton = {
                 Button(onClick = {
                     scope.launch { repo.setSystemIntegrationEnabled(true) }
@@ -898,11 +940,11 @@ fun SettingsScreen(active: Boolean = true) {
                     showShareWarning = false
                     // Toast rather than the Data page's backupStatus line: this control lives on
                     // Security and Privacy now (task 5).
-                    LucentToast.show(context, "System integration is on.")
-                }) { Text("Turn on") }
+                    LucentToast.show(context, S.systemIntegrationOnToast)
+                }) { Text(S.turnOn) }
             },
             dismissButton = {
-                TextButton(onClick = { showShareWarning = false }) { Text("Cancel") }
+                TextButton(onClick = { showShareWarning = false }) { Text(S.actionCancel) }
             }
         )
     }
@@ -910,8 +952,8 @@ fun SettingsScreen(active: Boolean = true) {
     if (showClearData) {
         AlertDialog(
             onDismissRequest = { showClearData = false },
-            title = { Text("Clear all data?") },
-            text = { Text("This permanently deletes every note, task, and chat message, and resets all settings (including your API key) to their defaults. This can't be undone.") },
+            title = { Text(S.clearAllDataTitle) },
+            text = { Text(S.clearAllDataBody) },
             confirmButton = {
                 TextButton(onClick = {
                     showClearData = false
@@ -937,12 +979,12 @@ fun SettingsScreen(active: Boolean = true) {
                         com.lucent.app.data.AttachmentStore.pruneOrphans(appContext, emptySet())
                         withContext(Dispatchers.Main) {
                             backupStatus = ""
-                            LucentToast.show(appContext, "All data cleared")
+                            LucentToast.show(appContext, S.allDataClearedToast)
                         }
                     }
-                }) { Text("Delete everything") }
+                }) { Text(S.deleteEverything) }
             },
-            dismissButton = { TextButton(onClick = { showClearData = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showClearData = false }) { Text(S.actionCancel) } }
         )
     }
 
@@ -952,8 +994,8 @@ fun SettingsScreen(active: Boolean = true) {
     if (showClearNotes) {
         AlertDialog(
             onDismissRequest = { showClearNotes = false },
-            title = { Text("Clear all notes?") },
-            text = { Text("This permanently deletes every note and its attachments. Your tasks and chats are kept. This can't be undone.") },
+            title = { Text(S.clearNotesTitle) },
+            text = { Text(S.clearNotesBody) },
             confirmButton = {
                 TextButton(onClick = {
                     showClearNotes = false
@@ -963,19 +1005,19 @@ fun SettingsScreen(active: Boolean = true) {
                         db.noteVersionDao().clearAll()
                         db.noteDao().clearAll()
                         com.lucent.app.data.AttachmentMigration.pruneOrphans(appContext)
-                        withContext(Dispatchers.Main) { LucentToast.show(appContext, "Notes cleared") }
+                        withContext(Dispatchers.Main) { LucentToast.show(appContext, S.notesClearedToast) }
                     }
-                }) { Text("Delete notes") }
+                }) { Text(S.deleteNotesBtn) }
             },
-            dismissButton = { TextButton(onClick = { showClearNotes = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showClearNotes = false }) { Text(S.actionCancel) } }
         )
     }
 
     if (showClearTasks) {
         AlertDialog(
             onDismissRequest = { showClearTasks = false },
-            title = { Text("Clear all tasks?") },
-            text = { Text("This permanently deletes every task (active and completed) and its attachments. Your notes and chats are kept. This can't be undone.") },
+            title = { Text(S.clearTasksTitle) },
+            text = { Text(S.clearTasksBody) },
             confirmButton = {
                 TextButton(onClick = {
                     showClearTasks = false
@@ -987,11 +1029,11 @@ fun SettingsScreen(active: Boolean = true) {
                         }
                         db.taskDao().clearAll()
                         com.lucent.app.data.AttachmentMigration.pruneOrphans(appContext)
-                        withContext(Dispatchers.Main) { LucentToast.show(appContext, "Tasks cleared") }
+                        withContext(Dispatchers.Main) { LucentToast.show(appContext, S.tasksClearedToast) }
                     }
-                }) { Text("Delete tasks") }
+                }) { Text(S.deleteTasksBtn) }
             },
-            dismissButton = { TextButton(onClick = { showClearTasks = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showClearTasks = false }) { Text(S.actionCancel) } }
         )
     }
 
@@ -1003,32 +1045,26 @@ fun SettingsScreen(active: Boolean = true) {
     // the profile list can change between opening the dialog and confirming; deleteProfile itself
     // also refuses to remove the last remaining profile.
     profilePendingDelete?.let { idx ->
-        val name = profiles.getOrNull(idx)?.name?.ifBlank { "API ${idx + 1}" } ?: "this API"
+        val name = profiles.getOrNull(idx)?.name?.ifBlank { S.apiFallbackName(idx + 1) } ?: S.thisApiFallback
         AlertDialog(
             onDismissRequest = { profilePendingDelete = null },
-            title = { Text("Delete this API?") },
-            text = {
-                Text(
-                    "This removes \"$name\", including its saved key, from this device. It can't be " +
-                        "undone. If the key isn't saved anywhere else you'll need to paste it in again " +
-                        "to use this API."
-                )
-            },
+            title = { Text(S.apiDeleteConfirmTitle) },
+            text = { Text(S.apiDeleteConfirmBody(name)) },
             confirmButton = {
                 TextButton(onClick = {
                     deleteProfile(idx)
                     profilePendingDelete = null
-                }) { Text("Delete") }
+                }) { Text(S.actionDelete) }
             },
-            dismissButton = { TextButton(onClick = { profilePendingDelete = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { profilePendingDelete = null }) { Text(S.actionCancel) } }
         )
     }
 
     if (showClearChats) {
         AlertDialog(
             onDismissRequest = { showClearChats = false },
-            title = { Text("Clear all chat history?") },
-            text = { Text("This permanently deletes every assistant conversation and message. Your notes and tasks are kept. This can't be undone.") },
+            title = { Text(S.clearChatsTitle) },
+            text = { Text(S.clearChatsBody) },
             confirmButton = {
                 TextButton(onClick = {
                     showClearChats = false
@@ -1036,11 +1072,75 @@ fun SettingsScreen(active: Boolean = true) {
                         db.chatDao().clearAll()
                         db.chatConversationDao().clearAll()
                         AssistantController.onAllChatsCleared(appContext)
-                        withContext(Dispatchers.Main) { LucentToast.show(appContext, "Chat history cleared") }
+                        withContext(Dispatchers.Main) { LucentToast.show(appContext, S.chatsClearedToast) }
                     }
-                }) { Text("Delete chat history") }
+                }) { Text(S.deleteChatsBtn) }
             },
-            dismissButton = { TextButton(onClick = { showClearChats = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showClearChats = false }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // --- Local model: delete confirmation (local-model task) ---
+    // Deleting frees the engine FIRST, then the file: unloading after deleting would leave a
+    // multi-gigabyte model resident with nothing on disk to reload, which is the worst of both.
+    if (lmConfirmDelete) {
+        AlertDialog(
+            onDismissRequest = { lmConfirmDelete = false },
+            title = { Text(S.lmDeleteTitle) },
+            text = { Text(S.lmDeleteBody(lmModelName ?: "model.gguf")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    lmConfirmDelete = false
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            LocalLlm.shutdown()
+                            LocalModelStore.delete(context)
+                            // Deleting the model also turns the routing flag off, so the app never
+                            // holds the incoherent "use local model, but there is no model" state —
+                            // the assistant reverts to the cloud API cleanly, exactly as the delete
+                            // dialog promises.
+                            repo.setLocalModelEnabled(false)
+                        }
+                        lmRefresh++
+                        LucentToast.show(appContext, S.lmDeletedToast)
+                    }
+                }) { Text(S.actionDelete) }
+            },
+            dismissButton = { TextButton(onClick = { lmConfirmDelete = false }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // Warn before letting the on-device model call tools: it can be slower and, on a small model,
+    // unreliable. Confirming enables it; cancelling leaves it off.
+    if (lmConfirmToolsOn) {
+        AlertDialog(
+            onDismissRequest = { lmConfirmToolsOn = false },
+            title = { Text(S.lmToolsWarnTitle) },
+            text = { Text(S.lmToolsWarnBody) },
+            confirmButton = {
+                TextButton(onClick = {
+                    lmConfirmToolsOn = false
+                    AppScope.io.launch { repo.setLocalToolsEnabled(true) }
+                }) { Text(S.lmWarnEnableAnyway) }
+            },
+            dismissButton = { TextButton(onClick = { lmConfirmToolsOn = false }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // Warn before switching the on-device model to the GPU: faster on some phones, but Vulkan
+    // drivers vary and it can be unstable; it also needs the GPU backend compiled into the build.
+    if (lmConfirmGpuOn) {
+        AlertDialog(
+            onDismissRequest = { lmConfirmGpuOn = false },
+            title = { Text(S.lmGpuWarnTitle) },
+            text = { Text(S.lmGpuWarnBody) },
+            confirmButton = {
+                TextButton(onClick = {
+                    lmConfirmGpuOn = false
+                    AppScope.io.launch { repo.setLocalGpuEnabled(true) }
+                }) { Text(S.lmWarnEnableAnyway) }
+            },
+            dismissButton = { TextButton(onClick = { lmConfirmGpuOn = false }) { Text(S.actionCancel) } }
         )
     }
 
@@ -1072,7 +1172,7 @@ fun SettingsScreen(active: Boolean = true) {
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
                 }
-                backupStatus = "Exported selected items."
+                backupStatus = S.exportedSelected
             }
         }
     }
@@ -1099,7 +1199,7 @@ fun SettingsScreen(active: Boolean = true) {
     if (exportKind != null) {
         when (exportKind) {
             ExportKind.NOTES -> ExportSelectionScreen(
-                title = "Export notes",
+                title = S.exportNotesScreenTitle,
                 items = notesForExport.filter { it.trashedAt == null },
                 id = { it.id },
                 label = { it.title },
@@ -1112,11 +1212,11 @@ fun SettingsScreen(active: Boolean = true) {
                 onBack = { exportKind = null }
             )
             ExportKind.TASKS -> ExportSelectionScreen(
-                title = "Export tasks",
+                title = S.exportTasksScreenTitle,
                 items = tasksForExport.filter { it.trashedAt == null },
                 id = { it.id },
                 label = { it.title },
-                subtitle = { formatTimestamp(it.createdAt) + if (it.isDone) " · done" else "" },
+                subtitle = { formatTimestamp(it.createdAt) + if (it.isDone) S.doneSuffix else "" },
                 timestamp = { it.createdAt },
                 searchText = { it.title + "\n" + it.notes },
                 onExport = { subset, format ->
@@ -1135,68 +1235,251 @@ fun SettingsScreen(active: Boolean = true) {
         when (route) {
             SettingsRoute.Root -> {
                 // Section order (task 11), and it is deliberately a journey from the cosmetic to the
-                // irreversible: how it looks, what it can do for you, how you write, who can get in,
-                // what leaves the device, and finally the page that can erase everything. The
-                // destructive page being last is the point — it is the one you should have to travel
-                // to rather than the one you land on.
-                NavCard("Appearance", "Theme, background palette, and font") { route = SettingsRoute.Appearance }
+                // irreversible: how it looks, what language it speaks, what it can do for you, how
+                // you write, who can get in, what leaves the device, and finally the page that can
+                // erase everything. The destructive page being last is the point — it is the one you
+                // should have to travel to rather than the one you land on.
+                NavCard(S.settingsAppearanceTitle, S.settingsAppearanceSub) { route = SettingsRoute.Appearance }
+                Spacer(modifier = Modifier.height(12.dp))
+                // Language sits beside Appearance because it answers the same kind of question —
+                // "how does this app present itself to me" — and a user hunting for it will look
+                // near the top, not under a technical heading (localization task).
+                NavCard(S.settingsLanguageTitle, S.settingsLanguageSub) { route = SettingsRoute.Language }
                 Spacer(modifier = Modifier.height(12.dp))
                 // The subtitle lists what is actually behind this card. It used to stop at the API,
                 // which quietly under-sold the section: memory and web search live here too, and a
                 // subtitle that names three of four things reads as a complete list rather than a
-                // truncated one — so the fourth looks like it isn't there. Shortened while adding
-                // it (36 characters down to 33) so it cannot wrap onto a second line.
-                NavCard("Assistant", "Name, style, API, memory, and web") { route = SettingsRoute.Assistant }
+                // truncated one — so the fourth looks like it isn't there.
+                NavCard(S.settingsAssistantTitle, S.settingsAssistantSub) { route = SettingsRoute.Assistant }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Editor", "Markdown formatting and links") { route = SettingsRoute.Editor }
+                NavCard(S.settingsEditorTitle, S.settingsEditorSub) { route = SettingsRoute.Editor }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Security", "App lock") { route = SettingsRoute.Security }
+                NavCard(S.settingsSecurityTitle, S.settingsSecuritySub) { route = SettingsRoute.Security }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Privacy", "System integration and local logging") { route = SettingsRoute.Privacy }
+                NavCard(S.settingsPrivacyTitle, S.settingsPrivacySub) { route = SettingsRoute.Privacy }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Data", "Backup, restore, and clear all data") { route = SettingsRoute.Data }
+                NavCard(S.settingsDataTitle, S.settingsDataSub) { route = SettingsRoute.Data }
+            }
+
+            SettingsRoute.Language -> {
+                BackHeader(S.settingsLanguageTitle) { route = SettingsRoute.Root }
+
+                // One flat radio list: "follow the system", then the four languages, each shown in
+                // its OWN language (the one universal convention for language pickers — a reader who
+                // can't parse the current UI language can still find their own name). Selecting
+                // writes the setting; MainActivity's collector applies it, and because the catalog
+                // is snapshot state every S-reading text in the app — including this list —
+                // recomposes in the new language on the very next frame. No restart, no flash.
+                Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                    Text(S.langPageHint, color = onGradientMuted, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { AppScope.io.launch { repo.setAppLanguage(AppLanguage.SYSTEM.key) } }
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = savedLanguage == AppLanguage.SYSTEM.key,
+                            onClick = { AppScope.io.launch { repo.setAppLanguage(AppLanguage.SYSTEM.key) } }
+                        )
+                        Column(modifier = Modifier.padding(start = 4.dp)) {
+                            Text(S.langSystem, color = onGradient)
+                            Text(
+                                S.langSystemDetail(AppLanguage.systemDefault().label),
+                                color = onGradientMuted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    listOf(AppLanguage.EN, AppLanguage.ZH, AppLanguage.JA, AppLanguage.KO).forEach { lang ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { AppScope.io.launch { repo.setAppLanguage(lang.key) } }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = savedLanguage == lang.key,
+                                onClick = { AppScope.io.launch { repo.setAppLanguage(lang.key) } }
+                            )
+                            Text(lang.label, color = onGradient, modifier = Modifier.padding(start = 4.dp))
+                        }
+                    }
+                }
             }
 
             SettingsRoute.Assistant -> {
-                BackHeader("Assistant") { route = SettingsRoute.Root }
+                BackHeader(S.settingsAssistantTitle) { route = SettingsRoute.Root }
 
-                // Order (task 10): Personalization, API, Memory & web. Personalization is its own
-                // sub-page, matching the API card's pattern so the Assistant screen is a consistent
-                // list of hierarchical entries.
-                NavCard("Personalization", "Assistant name and chat style") { route = SettingsRoute.Personalization }
+                // Order (task 10): Personalization, API, Memory & web, then Local model. The local
+                // model comes last because it is the alternative to everything above it: with it on,
+                // the API page's connection and the memory tier simply stop being consulted.
+                NavCard(S.settingsPersonalizationTitle, S.settingsPersonalizationSub) { route = SettingsRoute.Personalization }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // API is its own hierarchical page. The subtitle shows which profile is active so
                 // the user can see their current connection at a glance without opening it.
-                val activeName = profiles.getOrNull(selectedProfileIdx)?.name ?: "None"
-                NavCard("API", "Selection and connection · active: $activeName") { route = SettingsRoute.Api }
+                val activeName = profiles.getOrNull(selectedProfileIdx)?.name ?: ""
+                NavCard(S.settingsApiTitle, S.settingsApiSub(activeName)) { route = SettingsRoute.Api }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Memory and Web are one card again (task 10): a single "Memory & web" page holds the
                 // memory tier and the web-search toggle together.
-                NavCard("Memory & web", "How much it remembers · web search") { route = SettingsRoute.Memory }
+                NavCard(S.settingsMemoryWebTitle, S.settingsMemoryWebSub) { route = SettingsRoute.Memory }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // On-device GGUF assistant (local-model task).
+                NavCard(S.settingsLocalModelTitle, S.settingsLocalModelSub) { route = SettingsRoute.LocalModel }
+            }
+
+            SettingsRoute.LocalModel -> {
+                BackHeader(S.settingsLocalModelTitle) { route = SettingsRoute.Assistant }
+
+                if (!LocalLlm.isSupported()) {
+                    // The .so wasn't packaged for this ABI (or failed to load). Everything below
+                    // would be a dead end, so say why once, plainly, instead of offering buttons
+                    // that can only disappoint.
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Text(S.lmUnsupportedAbiNote, color = onGradientMuted, fontSize = 13.sp)
+                    }
+                } else {
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Text(S.lmPageIntro, color = onGradientMuted, fontSize = 13.sp)
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // What's imported right now — the name the user picked and its size — or an
+                        // honest "nothing yet". The size matters here: it is the RAM this feature
+                        // will want, and showing it is the cheapest possible expectation-setting.
+                        Text(
+                            if (lmHasModel) S.lmCurrentModel(lmModelName ?: "model.gguf", lmModelSize)
+                            else S.lmNoModelYet,
+                            color = onGradient,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(S.lmSizeHint, color = onGradientMuted, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        if (lmImporting) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(S.lmImporting, color = onGradientMuted, fontSize = 13.sp)
+                            }
+                        } else {
+                            Row {
+                                Button(onClick = { lmImportLauncher.launch(arrayOf("*/*")) }) {
+                                    Text(if (lmHasModel) S.lmReplaceButton else S.lmImportButton)
+                                }
+                                if (lmHasModel) {
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    TextButton(onClick = { lmConfirmDelete = true }) { Text(S.lmDeleteButton) }
+                                }
+                            }
+                        }
+                        if (lmError.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(lmError, color = Color(0xFFFFC1C1), fontSize = 13.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(S.lmUseLocalToggle, color = onGradient, fontSize = 16.sp)
+                                Text(
+                                    S.lmUseLocalToggleDesc,
+                                    color = onGradientMuted,
+                                    fontSize = 13.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            // Can't be switched ON without a model (that state would only produce an
+                            // error on the next send); can always be switched OFF, including the
+                            // legacy case of a stored "on" with the model since removed.
+                            Switch(
+                                checked = localModelEnabled,
+                                enabled = lmHasModel || localModelEnabled,
+                                onCheckedChange = { on -> AppScope.io.launch { repo.setLocalModelEnabled(on) } }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Opt-in: let the on-device model act on notes/tasks. Off by default because the
+                    // tool protocol costs extra generation rounds a weak phone feels; turning it ON
+                    // asks for confirmation first, turning it OFF is immediate.
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(S.lmToolsToggle, color = onGradient, fontSize = 16.sp)
+                                Text(S.lmToolsToggleDesc, color = onGradientMuted, fontSize = 13.sp)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Switch(
+                                checked = localToolsEnabled,
+                                enabled = lmHasModel || localToolsEnabled,
+                                onCheckedChange = { on ->
+                                    if (on) lmConfirmToolsOn = true
+                                    else AppScope.io.launch { repo.setLocalToolsEnabled(false) }
+                                }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Opt-in: run the model on the GPU instead of the CPU. Off (= CPU) by default
+                    // because CPU never crashes; GPU can be faster but is unstable on some Android
+                    // drivers, so switching TO it asks first, switching back to CPU is immediate.
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(S.lmGpuToggle, color = onGradient, fontSize = 16.sp)
+                                Text(S.lmGpuToggleDesc, color = onGradientMuted, fontSize = 13.sp)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Switch(
+                                checked = localGpuEnabled,
+                                onCheckedChange = { on ->
+                                    if (on) lmConfirmGpuOn = true
+                                    else AppScope.io.launch { repo.setLocalGpuEnabled(false) }
+                                }
+                            )
+                        }
+                    }
+                }
             }
 
             SettingsRoute.Personalization -> {
-                BackHeader("Personalization") { leavePersonalization() }
+                BackHeader(S.settingsPersonalizationTitle) { leavePersonalization() }
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     OutlinedTextField(
                         value = assistantName,
                         onValueChange = { assistantName = it },
-                        label = { Text("Assistant name") },
+                        label = { Text(S.fieldAssistantName) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = assistantStyle,
                         onValueChange = { assistantStyle = it },
-                        label = { Text("Chat Style") },
+                        label = { Text(S.fieldChatStyle) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(16.dp))
-                    Button(onClick = { persistAssistantSettings() }) { Text("Save") }
+                    Button(onClick = { persistAssistantSettings() }) { Text(S.actionSave) }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1209,10 +1492,9 @@ fun SettingsScreen(active: Boolean = true) {
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Typing haptics", color = onGradient, fontSize = 16.sp)
+                            Text(S.typingHapticsTitle, color = onGradient, fontSize = 16.sp)
                             Text(
-                                "A faint vibration as each character of a reply appears, and a single " +
-                                    "firmer pulse when the reply finishes.",
+                                S.typingHapticsDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1227,17 +1509,15 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Memory -> {
-                BackHeader("Memory & web") { route = SettingsRoute.Assistant }
+                BackHeader(S.settingsMemoryWebTitle) { route = SettingsRoute.Assistant }
 
                 // Memory tier (issue 9). Each option explains both what the assistant will remember
                 // and the rough cost trade-off, since more context means more tokens per reply.
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
-                    Text("Memory & cost", color = onGradient, fontSize = 16.sp)
+                    Text(S.memoryCostTitle, color = onGradient, fontSize = 16.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "How much past conversation is sent with each message. More memory gives better " +
-                            "continuity but costs more tokens per reply. Changing this never deletes anything — " +
-                            "your messages are always saved.",
+                        S.memoryCostDesc,
                         color = onGradientMuted,
                         fontSize = 13.sp
                     )
@@ -1247,24 +1527,24 @@ fun SettingsScreen(active: Boolean = true) {
 
                     MemoryTierRow(
                         selected = current == MemoryTier.LOW,
-                        title = "Low · single message",
-                        detail = "Only your latest message is sent. Cheapest, but the assistant won't remember earlier turns.",
+                        title = S.memoryLowTitle,
+                        detail = S.memoryLowDesc,
                         onGradient = onGradient,
                         onGradientMuted = onGradientMuted,
                         onClick = { AppScope.io.launch { repo.setMemoryTier(MemoryTier.LOW.key) } }
                     )
                     MemoryTierRow(
                         selected = current == MemoryTier.MEDIUM,
-                        title = "Medium · this conversation",
-                        detail = "The whole current conversation is sent. Balanced — good continuity at a moderate cost.",
+                        title = S.memoryMediumTitle,
+                        detail = S.memoryMediumDesc,
                         onGradient = onGradient,
                         onGradientMuted = onGradientMuted,
                         onClick = { AppScope.io.launch { repo.setMemoryTier(MemoryTier.MEDIUM.key) } }
                     )
                     MemoryTierRow(
                         selected = current == MemoryTier.HIGH,
-                        title = "High · across conversations",
-                        detail = "Also mixes in recent context from your other chats. Most context, highest cost per reply.",
+                        title = S.memoryHighTitle,
+                        detail = S.memoryHighDesc,
                         onGradient = onGradient,
                         onGradientMuted = onGradientMuted,
                         onClick = { AppScope.io.launch { repo.setMemoryTier(MemoryTier.HIGH.key) } }
@@ -1277,10 +1557,9 @@ fun SettingsScreen(active: Boolean = true) {
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Web search", color = onGradient, fontSize = 16.sp)
+                            Text(S.webSearchTitle, color = onGradient, fontSize = 16.sp)
                             Text(
-                                "Let the assistant look things up on the web when you ask about current or " +
-                                    "factual topics. When off, it answers from what it already knows.",
+                                S.webSearchDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1295,31 +1574,31 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Api -> {
-                BackHeader("API") { route = SettingsRoute.Assistant }
+                BackHeader(S.settingsApiTitle) { route = SettingsRoute.Assistant }
 
                 // ---- API Selection: pick which saved profile is active ----
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("API selection", color = onGradient, modifier = Modifier.weight(1f))
+                        Text(S.apiSelectionTitle, color = onGradient, modifier = Modifier.weight(1f))
                         Text("${profiles.size}/${com.lucent.app.data.ApiProfiles.MAX}", color = onGradientMuted, fontSize = 13.sp)
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text("Choose which saved API the assistant uses. You can keep up to ${com.lucent.app.data.ApiProfiles.MAX}.", color = onGradientMuted, fontSize = 13.sp)
+                    Text(S.apiSelectionDesc(com.lucent.app.data.ApiProfiles.MAX), color = onGradientMuted, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                     profiles.forEachIndexed { idx, p ->
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                             RadioButton(selected = idx == selectedProfileIdx, onClick = { selectProfile(idx) })
                             Column(modifier = Modifier.weight(1f).clickable { selectProfile(idx) }.padding(vertical = 4.dp)) {
-                                Text(p.name.ifBlank { "API ${idx + 1}" }, color = onGradient)
+                                Text(p.name.ifBlank { S.apiFallbackName(idx + 1) }, color = onGradient)
                                 Text(
-                                    "${specLabel(p.spec)} · ${if (p.model.isBlank()) "no model" else p.model}",
+                                    "${specLabel(p.spec)} · ${if (p.model.isBlank()) S.apiNoModel else p.model}",
                                     color = onGradientMuted,
                                     fontSize = 12.sp
                                 )
                             }
                             if (profiles.size > 1) {
                                 IconButton(onClick = { profilePendingDelete = idx }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete this API", tint = onGradientMuted)
+                                    Icon(Icons.Default.Delete, contentDescription = S.apiDeleteA11y, tint = onGradientMuted)
                                 }
                             }
                         }
@@ -1328,7 +1607,7 @@ fun SettingsScreen(active: Boolean = true) {
                         Spacer(modifier = Modifier.height(4.dp))
                         TextButton(onClick = { addProfile() }) {
                             Icon(Icons.Default.Add, contentDescription = null, tint = onGradient)
-                            Text(" Add API", color = onGradient)
+                            Text(" " + S.apiAddButton, color = onGradient)
                         }
                     }
                 }
@@ -1337,12 +1616,12 @@ fun SettingsScreen(active: Boolean = true) {
 
                 // ---- Editor for the selected profile ----
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
-                    Text("Edit selected API", color = onGradient)
+                    Text(S.apiEditTitle, color = onGradient)
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = editingProfileName,
                         onValueChange = { editingProfileName = it },
-                        label = { Text("Name") },
+                        label = { Text(S.fieldName) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1355,13 +1634,13 @@ fun SettingsScreen(active: Boolean = true) {
                             typingReveal = true
                             keystrokeSeq++
                         },
-                        label = { Text("API key") },
+                        label = { Text(S.fieldApiKey) },
                         visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
                             IconButton(onClick = { manualReveal = true }) {
                                 Icon(
                                     if (keyVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                    contentDescription = "Toggle key visibility"
+                                    contentDescription = S.a11yToggleKeyVisibility
                                 )
                             }
                         },
@@ -1369,35 +1648,35 @@ fun SettingsScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("API specification", color = onGradient)
+                    Text(S.apiSpecTitle, color = onGradient)
                     Row {
                         RadioButton(selected = spec == "openai", onClick = { spec = "openai" })
-                        Text("OpenAI-compatible", color = onGradient, modifier = Modifier.padding(top = 14.dp))
+                        Text(S.apiSpecOpenAi, color = onGradient, modifier = Modifier.padding(top = 14.dp))
                     }
                     Row {
                         RadioButton(selected = spec == "anthropic", onClick = { spec = "anthropic" })
-                        Text("Anthropic-compatible", color = onGradient, modifier = Modifier.padding(top = 14.dp))
+                        Text(S.apiSpecAnthropic, color = onGradient, modifier = Modifier.padding(top = 14.dp))
                     }
                     Row {
                         RadioButton(selected = spec == "google", onClick = { spec = "google" })
-                        Text("Google-compatible", color = onGradient, modifier = Modifier.padding(top = 14.dp))
+                        Text(S.apiSpecGoogle, color = onGradient, modifier = Modifier.padding(top = 14.dp))
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("API connection", color = onGradient)
+                    Text(S.apiConnectionTitle, color = onGradient)
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = url,
                         onValueChange = { url = it },
-                        label = { Text("Base URL") },
+                        label = { Text(S.fieldBaseUrl) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         when (spec) {
-                            "anthropic" -> "e.g. https://api.anthropic.com/v1"
-                            "google" -> "e.g. https://generativelanguage.googleapis.com/v1beta"
-                            else -> "e.g. https://api.openai.com/v1"
+                            "anthropic" -> S.apiUrlExampleAnthropic
+                            "google" -> S.apiUrlExampleGoogle
+                            else -> S.apiUrlExampleOpenAi
                         },
                         color = onGradientMuted
                     )
@@ -1415,9 +1694,9 @@ fun SettingsScreen(active: Boolean = true) {
                             val result = LlmClient.fetchModels(url.trim(), apiSpecEnum, key.trim())
                             loading = false
                             result.onSuccess { models = it }
-                                .onFailure { errorText = "${it.javaClass.simpleName}: ${it.message ?: "no details"}" }
+                                .onFailure { errorText = S.errorWithDetail(it.javaClass.simpleName, it.message ?: S.noDetails) }
                         }
-                    }) { Text("Fetch available models") }
+                    }) { Text(S.fetchModels) }
 
                     if (loading) {
                         Spacer(modifier = Modifier.height(8.dp))
@@ -1429,10 +1708,10 @@ fun SettingsScreen(active: Boolean = true) {
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("Model", color = onGradient)
+                    Text(S.fieldModel, color = onGradient)
                     Box {
                         Button(onClick = { menuExpanded = true }, enabled = models.isNotEmpty()) {
-                            Text(if (selectedModel.isBlank()) "Choose a model" else selectedModel)
+                            Text(if (selectedModel.isBlank()) S.chooseModel else selectedModel)
                         }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                             Column(
@@ -1451,28 +1730,28 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                     if (models.isEmpty() && selectedModel.isNotBlank()) {
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("Currently: $selectedModel. Fetch models to change it.", color = onGradientMuted, fontSize = 12.sp)
+                        Text(S.currentModelHint(selectedModel), color = onGradientMuted, fontSize = 12.sp)
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
                     // Saving writes the edits into the selected profile and activates it, so the
                     // assistant uses it right away.
-                    Button(onClick = { saveActiveProfile(selectedProfileIdx) }) { Text("Save API") }
+                    Button(onClick = { saveActiveProfile(selectedProfileIdx) }) { Text(S.saveApi) }
                 }
             }
 
             SettingsRoute.Appearance -> {
-                BackHeader("Appearance") { route = SettingsRoute.Root }
+                BackHeader(S.settingsAppearanceTitle) { route = SettingsRoute.Root }
                 // Three hierarchical entries, mirroring the Assistant screen's structure.
-                NavCard("Theme", "Light, dark, the system, or a Monet tint") { route = SettingsRoute.Theme }
+                NavCard(S.settingsThemeTitle, S.settingsThemeSub) { route = SettingsRoute.Theme }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Background", "Colour palette behind the glass") { route = SettingsRoute.Background }
+                NavCard(S.settingsBackgroundTitle, S.settingsBackgroundSub) { route = SettingsRoute.Background }
                 Spacer(modifier = Modifier.height(12.dp))
-                NavCard("Font", "Typeface used across the app") { route = SettingsRoute.Font }
+                NavCard(S.settingsFontTitle, S.settingsFontSub) { route = SettingsRoute.Font }
             }
 
             SettingsRoute.Theme -> {
-                BackHeader("Theme") { route = SettingsRoute.Appearance }
+                BackHeader(S.settingsThemeTitle) { route = SettingsRoute.Appearance }
                 // One flat list of every appearance, System/Light/Dark and the four Monet tints
                 // alike (added task 1). They are peers, not a menu with a sub-menu of "extras":
                 // each one is simply an answer to "what should the app look like", and a tint is no
@@ -1503,7 +1782,7 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Background -> {
-                BackHeader("Background") { route = SettingsRoute.Appearance }
+                BackHeader(S.settingsBackgroundTitle) { route = SettingsRoute.Appearance }
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     // Auto-cycle: rotates through every palette over time. Its swatch previews the
                     // spread of colours it moves through.
@@ -1513,14 +1792,14 @@ fun SettingsScreen(active: Boolean = true) {
                             onClick = { AppScope.io.launch { repo.setPalette(PALETTE_CYCLE) } }
                         )
                         PaletteSwatch(LucentPalette.entries.map { it.colors.first() })
-                        Text("Cycle (auto)", color = onGradient, modifier = Modifier.padding(start = 10.dp))
+                        Text(S.paletteCycleAuto, color = onGradient, modifier = Modifier.padding(start = 10.dp))
                     }
 
                     // Palettes grouped by kind, each with a small colour preview.
                     listOf(
-                        "Solid" to PaletteGroup.SOLID,
-                        "Gradient" to PaletteGroup.GRADIENT,
-                        "Classic" to PaletteGroup.CLASSIC
+                        S.paletteGroupSolid to PaletteGroup.SOLID,
+                        S.paletteGroupGradient to PaletteGroup.GRADIENT,
+                        S.paletteGroupClassic to PaletteGroup.CLASSIC
                     ).forEach { (heading, group) ->
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(heading, color = onGradientMuted, fontSize = 13.sp)
@@ -1539,18 +1818,26 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Font -> {
-                BackHeader("Font") { route = SettingsRoute.Appearance }
+                BackHeader(S.settingsFontTitle) { route = SettingsRoute.Appearance }
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
-                    // Each option's label is drawn in the font it selects, so the list doubles as a
-                    // live preview. Selecting one saves immediately.
-                    LucentFont.entries.forEach { f ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                    // One row per font, its label drawn in its own font so the list doubles as a live
+                    // preview; selecting saves immediately. The list is grouped by writing system with
+                    // a localized header, so all twelve faces are shown but it's always clear which
+                    // language each is for. A small reusable row keeps the four groups identical.
+                    @Composable
+                    fun fontRow(f: LucentFont, shownLabel: String) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                AppScope.io.launch { repo.setFont(f.key) }
+                            }
+                        ) {
                             RadioButton(
                                 selected = savedFont == f.key,
                                 onClick = { AppScope.io.launch { repo.setFont(f.key) } }
                             )
                             Text(
-                                f.label,
+                                shownLabel,
                                 color = onGradient,
                                 fontFamily = f.fontFamily,
                                 fontSize = 16.sp,
@@ -1558,18 +1845,36 @@ fun SettingsScreen(active: Boolean = true) {
                             )
                         }
                     }
+
+                    @Composable
+                    fun fontGroup(header: String, script: FontScript) {
+                        Text(
+                            header,
+                            color = onGradientMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+                        )
+                        LucentFont.entries.filter { it.script == script }.forEach { fontRow(it, it.label) }
+                    }
+
+                    // System first (localized label), then the four language groups.
+                    fontRow(LucentFont.SYSTEM, S.fontSystemLabel)
+                    fontGroup(S.fontGroupEnglish, FontScript.LATIN)
+                    fontGroup(S.fontGroupChinese, FontScript.CHINESE)
+                    fontGroup(S.fontGroupJapanese, FontScript.JAPANESE)
+                    fontGroup(S.fontGroupKorean, FontScript.KOREAN)
                 }
             }
 
             SettingsRoute.Editor -> {
-                BackHeader("Editor") { route = SettingsRoute.Root }
+                BackHeader(S.settingsEditorTitle) { route = SettingsRoute.Root }
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Markdown formatting", color = onGradient)
+                            Text(S.markdownFormattingTitle, color = onGradient)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "When on, note bodies are rendered as Markdown — # headings, **bold**, *italic*, `code`, and lists — and the composer shows a formatting hint. When off, notes are shown exactly as typed, with no styling and no hint. Off by default.",
+                                S.markdownFormattingDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1593,10 +1898,10 @@ fun SettingsScreen(active: Boolean = true) {
                     // included (see ui/Markdown.kt, LinkedPlainText).
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Links", color = onGradient)
+                            Text(S.linksTitle, color = onGradient)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Links come in two kinds. Internal links use double brackets around a note's title, like [[Shopping list]]: they become tappable and jump straight to that note, and the note you link to shows a \"Linked from\" reference back. If the title doesn't exist yet the link shows in red and tapping it creates that note. External links use the standard Markdown form [text](https://example.com) and open in your browser. When this is off, both are shown as plain text and do nothing. This works with or without Markdown formatting — with Markdown off, your text is shown exactly as typed and links still work.",
+                                S.linksDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1611,7 +1916,7 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Security -> {
-                BackHeader("Security") { route = SettingsRoute.Root }
+                BackHeader(S.settingsSecurityTitle) { route = SettingsRoute.Root }
 
                 // Security is "who can get into this app", and right now that is exactly one control
                 // — the app lock, moved here by task 10. It is the page's only occupant on purpose:
@@ -1621,12 +1926,10 @@ fun SettingsScreen(active: Boolean = true) {
                     // ---- App Lock ----
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("App lock", color = onGradient)
+                            Text(S.appLockTitle, color = onGradient)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Require a password each time Lucent is opened from closed. You can add " +
-                                    "an optional security question to reset the password if you forget it. " +
-                                    "Neither the password nor the answer is stored — only a salted hash.",
+                                S.appLockDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1654,7 +1957,7 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Privacy -> {
-                BackHeader("Privacy") { route = SettingsRoute.Root }
+                BackHeader(S.settingsPrivacyTitle) { route = SettingsRoute.Root }
 
                 // Privacy is the other half of the old combined page (task 10): not "who can get in"
                 // but "what gets out, or written down". Both switches here are off by default and
@@ -1664,12 +1967,10 @@ fun SettingsScreen(active: Boolean = true) {
                     // ---- System share / intent integration ----
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("System integration", color = onGradient)
+                            Text(S.systemIntegrationTitle, color = onGradient)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Let Lucent appear in the Android share sheet so you can send text or files " +
-                                    "from other apps straight into a new note or task. Off by default. Turning " +
-                                    "it on makes Lucent visible to other apps as a share target.",
+                                S.systemIntegrationDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1693,12 +1994,10 @@ fun SettingsScreen(active: Boolean = true) {
                     Spacer(modifier = Modifier.height(20.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Startup logging", color = onGradient)
+                            Text(S.startupLoggingTitle, color = onGradient)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Record app startup events to a local file for troubleshooting. These logs " +
-                                    "stay on this device and are never sent anywhere — the only way they leave " +
-                                    "is if you export them yourself below.",
+                                S.startupLoggingDesc,
                                 color = onGradientMuted,
                                 fontSize = 13.sp
                             )
@@ -1709,6 +2008,9 @@ fun SettingsScreen(active: Boolean = true) {
                             onCheckedChange = { turnOn ->
                                 scope.launch { repo.setStartupLoggingEnabled(turnOn) }
                                 StartupLog.setEnabled(turnOn)
+                                // The log file itself is a diagnostic artefact and stays English on
+                                // purpose, like every other log line — it must read the same in a
+                                // bug report no matter what language the UI was in at the time.
                                 StartupLog.event(context, if (turnOn) "Logging enabled from Settings" else "")
                             }
                         )
@@ -1716,60 +2018,65 @@ fun SettingsScreen(active: Boolean = true) {
                     if (startupLoggingOn) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Row {
-                            Button(onClick = { logsExportLauncher.launch("lucent-startup-log.txt") }) { Text("Export logs") }
+                            Button(onClick = { logsExportLauncher.launch("lucent-startup-log.txt") }) { Text(S.exportLogs) }
                             Spacer(modifier = Modifier.width(12.dp))
                             TextButton(onClick = {
                                 StartupLog.clear(context)
                                 // Toast rather than the Data page's backupStatus line, which isn't
                                 // shown on this page (task 5 moved these controls here).
-                                LucentToast.show(context, "Logs cleared.")
-                            }) { Text("Clear logs") }
+                                LucentToast.show(context, S.logsClearedToast)
+                            }) { Text(S.clearLogs) }
                         }
                     }
                 }
             }
 
             SettingsRoute.Data -> {
-                BackHeader("Data") { route = SettingsRoute.Root }
+                BackHeader(S.settingsDataTitle) { route = SettingsRoute.Root }
 
                 // Shown only in the (rare, alarming) case where the database couldn't be decrypted.
                 // Nothing was deleted — the old file was set aside — but silence here would leave
                 // someone staring at an empty app with no idea why, and no idea what to do.
                 if (lockedNotice != null && !lockedDismissed) {
                     Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
-                        Text("Your notes couldn't be unlocked", color = Color(0xFFFF8A80))
+                        Text(S.lockedNoticeTitle, color = Color(0xFFFF8A80))
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text(lockedNotice, color = onGradientMuted, fontSize = 13.sp)
+                        Text(
+                            if (lockedNoticeFileName != null) S.lockedNoticeBody(lockedNoticeFileName)
+                            else lockedNotice,
+                            color = onGradientMuted,
+                            fontSize = 13.sp
+                        )
                         Spacer(modifier = Modifier.height(12.dp))
                         Row {
-                            Button(onClick = { importLauncher.launch(arrayOf("*/*")) }) { Text("Import backup") }
+                            Button(onClick = { importLauncher.launch(arrayOf("*/*")) }) { Text(S.importBackup) }
                             Spacer(modifier = Modifier.width(12.dp))
                             TextButton(onClick = {
                                 com.lucent.app.data.DatabaseEncryption.clearLockedNotice(context)
                                 lockedDismissed = true
-                            }) { Text("Dismiss") }
+                            }) { Text(S.actionDismiss) }
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
                 }
 
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
-                    Text("Backup & restore", color = onGradient)
+                    Text(S.backupRestoreTitle, color = onGradient)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "One encrypted .lcb file holds everything: notes (archived ones included), tasks, note version history, chats, every attachment, and your settings. The whole file is encrypted, not just your API key. By default it's locked with Lucent's built-in key so it restores on any device with just the file; you can add your own password for stronger protection. Importing shows you what's inside before it changes anything. Only .lcb files exported by this app can be restored.",
+                        S.backupRestoreDesc,
                         color = onGradientMuted,
                         fontSize = 13.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Row {
-                        Button(onClick = { showExportDialog = true }) { Text("Export backup") }
+                        Button(onClick = { showExportDialog = true }) { Text(S.exportBackup) }
                         Spacer(modifier = Modifier.width(12.dp))
                         // Allow any file so a beginner can always locate their .lcb even when the
                         // device reports an unexpected MIME type for it. The import path validates the
                         // content itself — it requires a Lucent .lcb envelope and rejects anything else
                         // with a clear message (legacy ZIP/JSON support has been removed, task 5).
-                        Button(onClick = { importLauncher.launch(arrayOf("*/*")) }) { Text("Import backup") }
+                        Button(onClick = { importLauncher.launch(arrayOf("*/*")) }) { Text(S.importBackup) }
                     }
                     if (backupStatus.isNotBlank()) {
                         Spacer(modifier = Modifier.height(8.dp))
@@ -1777,22 +2084,22 @@ fun SettingsScreen(active: Boolean = true) {
                     }
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    Text("Export notes & tasks", color = onGradient)
+                    Text(S.exportNotesTasksTitle, color = onGradient)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "Write your notes or tasks to a single file you can keep or open anywhere — choose Markdown, Word, PDF, or Excel on the next screen. Pick exactly which items to include (with a search box and Select-All). These files are NOT encrypted: that is the entire point of them. Attachments are listed by name but not embedded; use the encrypted backup when you need the files themselves.",
+                        S.exportNotesTasksDesc,
                         color = onGradientMuted,
                         fontSize = 13.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     // Two full-width buttons, tasks first (task 9). They line up cleanly instead of the
                     // old mismatched row, and each opens the pick-items-and-format screen.
-                    Button(onClick = { exportKind = ExportKind.TASKS }, modifier = Modifier.fillMaxWidth()) { Text("Choose tasks to export…") }
+                    Button(onClick = { exportKind = ExportKind.TASKS }, modifier = Modifier.fillMaxWidth()) { Text(S.chooseTasksToExport) }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { exportKind = ExportKind.NOTES }, modifier = Modifier.fillMaxWidth()) { Text("Choose notes to export…") }
+                    Button(onClick = { exportKind = ExportKind.NOTES }, modifier = Modifier.fillMaxWidth()) { Text(S.chooseNotesToExport) }
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    Text("Danger zone", color = onGradient)
+                    Text(S.dangerZone, color = onGradient)
                     Spacer(modifier = Modifier.height(8.dp))
                     // Targeted clears, then the full wipe. All four are identical full-width
                     // rectangles (same shape/size) with the same red style; each asks for
@@ -1802,32 +2109,35 @@ fun SettingsScreen(active: Boolean = true) {
                         onClick = { showClearNotes = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Clear notes") }
+                    ) { Text(S.clearNotesBtn) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = { showClearTasks = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Clear tasks") }
+                    ) { Text(S.clearTasksBtn) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = { showClearChats = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Clear chat history") }
+                    ) { Text(S.clearChatsBtn) }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = { showClearData = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB3261E)),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Clear all data") }
+                    ) { Text(S.clearAllDataBtn) }
                 }
             }
         }
     }
 }
 
-/** Human label for a stored API spec key. */
+/**
+ * Human label for a stored API spec key. Provider names are proper nouns — identical in every
+ * supported language — so this stays a plain map rather than a catalog lookup.
+ */
 private fun specLabel(spec: String): String = when (spec) {
     "anthropic" -> "Anthropic"
     "google" -> "Google"
@@ -1876,7 +2186,7 @@ private fun BackHeader(title: String, onBack: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = onGradient)
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = S.actionBack, tint = onGradient)
         }
         Text(title, color = onGradient, fontSize = 20.sp)
     }

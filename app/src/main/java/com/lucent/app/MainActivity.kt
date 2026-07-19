@@ -110,15 +110,27 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
-enum class Screen(val label: String) {
+enum class Screen {
     // Bottom-bar order is this declaration order (the bar iterates Screen.entries). Tasks is
     // listed first so it sits on the LEFT of the capsule and Notes on its right.
     //
     // All four are now equal-status top-level destinations (task 13): the app opens on Tasks, but
     // every tab exits the app directly on back rather than routing through Tasks first. The single
-    // label source below drives BOTH the bottom-nav capsule text and the top-app-bar page header,
-    // so renaming "Settings" to "Setting" here updates it in both places at once (task 3).
-    Tasks("Tasks"), Notes("Notes"), Assistant("Assistant"), Settings("Setting")
+    // label source below drives BOTH the bottom-nav capsule text and the top-app-bar page header.
+    //
+    // The label is a *computed* property over the i18n table (localization task) rather than a
+    // constructor constant: reading S inside composition makes every tab caption and page header
+    // re-render the instant the language setting changes, while every call site keeps compiling
+    // against the same `screen.label` it always used.
+    Tasks, Notes, Assistant, Settings;
+
+    val label: String
+        get() = when (this) {
+            Tasks -> com.lucent.app.i18n.S.tabTasks
+            Notes -> com.lucent.app.i18n.S.tabNotes
+            Assistant -> com.lucent.app.i18n.S.tabAssistant
+            Settings -> com.lucent.app.i18n.S.tabSettings
+        }
 }
 
 class MainActivity : ComponentActivity() {
@@ -152,6 +164,11 @@ class MainActivity : ComponentActivity() {
         val initialThemeMode = display.themeMode
         val initialPalette = display.palette
         val initialFont = display.font
+
+        // Apply the saved UI language before anything composes (localization task) — for the same
+        // reason the display prefs are read synchronously above: a first frame in English that
+        // snaps to Chinese a beat later is exactly the startup blink this block exists to prevent.
+        com.lucent.app.i18n.L.apply(startup.appLanguage)
 
         val lockEnabled = startup.appLockEnabled
         AppLockController.markProcessStarted(lockEnabled)
@@ -224,6 +241,12 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsRepo.themeMode.collectAsState(initial = initialThemeMode)
             val paletteName by settingsRepo.palette.collectAsState(initial = initialPalette)
             val fontKey by settingsRepo.font.collectAsState(initial = initialFont)
+
+            // Keep the runtime language in step with the setting (localization task). L.current is
+            // snapshot state, so this LaunchedEffect flipping it recomposes every S-reading text in
+            // the app at once — the switch in Settings takes effect instantly, no restart.
+            val languageKey by settingsRepo.appLanguage.collectAsState(initial = startup.appLanguage)
+            LaunchedEffect(languageKey) { com.lucent.app.i18n.L.apply(languageKey) }
 
             // Which appearance is actually in force. Everything a theme decides now comes from the
             // theme itself (see ui/ThemeModes.kt) rather than from string comparisons scattered
@@ -334,6 +357,19 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Release the on-device model the moment the user actually leaves the app (task: memory must
+     * be freed automatically on exit). `isFinishing` distinguishes a real exit — back out of the
+     * app, swipe it away — from a configuration change like rotation, where the Activity is
+     * destroyed only to be immediately recreated and unloading a multi-gigabyte model would force
+     * a pointless reload. If the OS kills the process instead, the kernel reclaims the memory
+     * anyway, so every exit path ends with the model gone.
+     */
+    override fun onDestroy() {
+        if (isFinishing) com.lucent.app.local.LocalLlm.shutdown()
+        super.onDestroy()
+    }
+
+    /**
      * Turn an inbound ACTION_SEND into a pending share (task 6), if — and only if — the user has
      * turned system integration on. The share-sheet component can't deliver anything while the
      * setting is off, but this re-check is a cheap belt-and-braces so a stale component state can
@@ -439,14 +475,14 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color) {
     pendingNavigation?.let { action ->
         AlertDialog(
             onDismissRequest = { pendingNavigation = null },
-            title = { Text("Unsaved changes") },
-            text = { Text("You have unsaved changes. Save them before leaving?") },
+            title = { Text(com.lucent.app.i18n.S.unsavedChangesTitle) },
+            text = { Text(com.lucent.app.i18n.S.unsavedChangesBody) },
             confirmButton = {
                 TextButton(onClick = {
                     UnsavedChangesGuard.save()
                     pendingNavigation = null
                     action()
-                }) { Text("Save") }
+                }) { Text(com.lucent.app.i18n.S.actionSave) }
             },
             dismissButton = {
                 Row {
@@ -454,8 +490,8 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color) {
                         UnsavedChangesGuard.discard()
                         pendingNavigation = null
                         action()
-                    }) { Text("Discard") }
-                    TextButton(onClick = { pendingNavigation = null }) { Text("Cancel") }
+                    }) { Text(com.lucent.app.i18n.S.actionDiscard) }
+                    TextButton(onClick = { pendingNavigation = null }) { Text(com.lucent.app.i18n.S.actionCancel) }
                 }
             }
         )
@@ -477,7 +513,7 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color) {
             // runOrConfirm so a half-written note or task can't be lost to a stray back press.
             !backArmed -> {
                 backArmed = true
-                LucentToast.show(context, "Press back again to exit")
+                LucentToast.show(context, com.lucent.app.i18n.S.pressBackAgainToExit)
             }
             else -> runOrConfirm { finishActivity() }
         }
