@@ -19,7 +19,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="New note"
+        android:text="@string/widget_new_note"
         android:textColor="@color/widget_text"
         android:textSize="13sp"
         android:maxLines="1" />

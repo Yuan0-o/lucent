@@ -28,7 +28,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="Note"
+            android:text="@string/widget_note"
             android:textColor="@color/widget_text"
             android:textSize="12sp"
             android:maxLines="1" />
@@ -53,7 +53,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="Task"
+            android:text="@string/widget_task"
             android:textColor="@color/widget_text"
             android:textSize="12sp"
             android:maxLines="1" />
@@ -78,7 +78,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="Ask"
+            android:text="@string/widget_ask"
             android:textColor="@color/widget_text"
             android:textSize="12sp"
             android:maxLines="1" />

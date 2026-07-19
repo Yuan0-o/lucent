@@ -2,4 +2,20 @@
     <!-- Launcher label, shown under the home-screen icon. Uses the mathematical
          script (bold) capitals so it renders as 𝓛𝓾𝓬𝓮𝓷𝓽 on the launcher. -->
     <string name="app_name">𝓛𝓾𝓬𝓮𝓷𝓽</string>
+
+    <!-- Launcher widgets. These are the one surface that renders outside the app process,
+         so they can't read the in-app catalog (i18n/I18n.kt) and localize the classic way
+         through res/values-*. The app_name brand mark is deliberately NOT translated. -->
+    <string name="widget_ask">Ask</string>
+    <string name="widget_new_note">New note</string>
+    <string name="widget_new_task">New task</string>
+    <string name="widget_note">Note</string>
+    <string name="widget_task">Task</string>
+    <string name="widget_tasks_title">Tasks</string>
+    <string name="widget_today_empty">Nothing to do. Tap + to add a task.</string>
+    <string name="widget_open_tasks">open tasks</string>
+    <string name="widget_open_task_one">open task</string>
+    <string name="widget_no_pinned_note">No pinned note</string>
+    <string name="widget_untitled">Untitled</string>
+    <string name="widget_untitled_task">Untitled task</string>
 </resources>
