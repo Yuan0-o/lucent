@@ -53,16 +53,15 @@ android {
 
         externalNativeBuild {
             cmake {
-                // The GPU (Vulkan) backend for the on-device model is OFF by default so CI always
-                // produces an APK — a non-technical maintainer can't debug a build that stops
-                // building, and on Android GPU offload is the biggest crash source (see
-                // cpp/CMakeLists.txt). The in-app CPU/GPU switch still ships and defaults to CPU;
-                // with no GPU backend compiled, choosing GPU just stays on CPU (never crashes).
+                // The GPU (Vulkan) backend for the on-device model is compiled IN by default, so the
+                // in-app CPU/GPU switch can really offload to the GPU. The switch itself still
+                // defaults to CPU and warns before enabling GPU; and if a device's Vulkan driver
+                // can't handle it, LocalLlm falls back to CPU instead of crashing (see
+                // cpp/CMakeLists.txt and LocalLlm.kt). The shader compiler (glslc) is taken from the
+                // NDK, so no extra tooling install is required.
                 //
-                // To compile the GPU backend in, build with -PlocalGpu (and uncomment the workflow's
-                // "Install Vulkan shader tools" step, which puts glslc on PATH). Then the GPU switch
-                // actually offloads to the GPU.
-                arguments += "-DLUCENT_ENABLE_VULKAN=${if (project.hasProperty("localGpu")) "ON" else "OFF"}"
+                // Build a smaller, CPU-only APK with -PcpuOnly (e.g. if the Vulkan build ever fails).
+                arguments += "-DLUCENT_ENABLE_VULKAN=${if (project.hasProperty("cpuOnly")) "OFF" else "ON"}"
             }
         }
     }
