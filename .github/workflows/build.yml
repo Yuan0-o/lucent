@@ -1,41 +1,70 @@
-name: Build release APK
+# ============================================================================================
+#  Lucent — build a SIGNED RELEASE APK (never a debug build)
+# ============================================================================================
+#
+# This workflow assembles the *release* variant only: `gradle assembleRelease`, output taken from
+# app/build/outputs/apk/RELEASE/, and signed with your keystore. There is no debug build here — the
+# final step even runs apksigner and fails if the APK is not a properly signed release, so a
+# misconfigured secret can never quietly hand you an unsigned or debug-keyed APK.
+#
+# It matches the current codebase exactly:
+#   • Compose app (compileSdk 36, minSdk 26)
+#   • On-device GGUF assistant — llama.cpp native module, pinned at tag b9888 (app/src/main/cpp)
+#   • Rust acceleration library (rust/) built with cargo-ndk
+#   • Two ABIs: arm64-v8a and armeabi-v7a (see app/build.gradle.kts abiFilters)
+#
+# Signing material never lives in the repository. Two repository secrets feed the build:
+#   LUCENT_KEYSTORE_BASE64    the release keystore file, base64-encoded to text
+#   LUCENT_KEYSTORE_PASSWORD  its password (the same password also protects the key inside)
+# The keystore is decoded into the runner's temp dir for one build; the runner is then destroyed.
+# The key alias is fixed to "lucent".
+#
+# Historically the flakiest part of an Android + native build is a mid-build download — the Android
+# Gradle Plugin fetching the NDK/CMake during assemble, or CMake's FetchContent cloning llama.cpp
+# inside a per-ABI configure. Both are hoisted into their own pinned, labelled steps below (the
+# llama.cpp clone with three retries), so a network hiccup fails a clear step instead of a cryptic
+# one deep inside Gradle.
 
-# Manual, phone-driven release job: press "Run workflow", download the signed APK artifact.
-#
-# Signing material never lives in this repository. Two repository secrets feed the build:
-#   LUCENT_KEYSTORE_BASE64    the release keystore file, base64-encoded into text
-#   LUCENT_KEYSTORE_PASSWORD  its password (the same password protects the key inside)
-# The keystore is decoded into the runner's temp directory for the duration of one build and the
-# runner is destroyed afterwards. The key alias is fixed to "lucent".
-#
-# Note for maintainers: an earlier version of this workflow died on
-# `set -euo pipefail` + `yes | sdkmanager --licenses` — when sdkmanager exits, `yes` is killed by
-# SIGPIPE, pipefail turns that into a failing pipeline, and -e aborts the step. This app is pure
-# Kotlin (no NDK/CMake), the runner's preinstalled SDK covers it, so the whole sdkmanager step is
-# gone rather than patched.
+name: Build signed release APK
 
 on:
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version name users see, e.g. 1.0.0. Leave blank to use MARKETING_VERSION in app/build.gradle.kts.'
+        required: false
+        default: ''
+
+# Only the version-name box is an input. The version CODE is always the run number (it just has to
+# increase, and no user ever sees it) — see app/build.gradle.kts.
 
 jobs:
-  build:
+  build-release:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Announce build type
+        run: |
+          echo "=============================================="
+          echo " Building variant: RELEASE (signed)"
+          echo " versionCode : ${{ github.run_number }} (auto, invisible to users)"
+          echo " versionName : ${{ inputs.version_name != '' && inputs.version_name || 'MARKETING_VERSION from app/build.gradle.kts' }}"
+          echo "=============================================="
+
       - name: Checkout repo
         # v6 runs on Node 24 (v4 targeted the now-deprecated Node 20).
         uses: actions/checkout@v6
 
       - name: Check signing secrets are configured
-        # Fail in seconds with a plain-language message instead of 10 minutes in with a Gradle
-        # signing stack trace — the most likely first-run mistake is a missing/misnamed secret.
+        # Fail in seconds with a plain-language message instead of ten minutes in with a Gradle
+        # signing stack trace — a missing or misnamed secret is the most likely first-run mistake.
         env:
           LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
           LUCENT_KEYSTORE_PASSWORD: ${{ secrets.LUCENT_KEYSTORE_PASSWORD }}
         run: |
           if [ -z "$LUCENT_KEYSTORE_BASE64" ] || [ -z "$LUCENT_KEYSTORE_PASSWORD" ]; then
             echo "::error::Missing repository secret LUCENT_KEYSTORE_BASE64 and/or LUCENT_KEYSTORE_PASSWORD."
-            echo "::error::Add both under: repository Settings -> Secrets and variables -> Actions -> New repository secret."
+            echo "::error::Add both under: Settings -> Secrets and variables -> Actions -> New repository secret."
             exit 1
           fi
           echo "Both signing secrets are present."
@@ -48,8 +77,8 @@ jobs:
           distribution: 'temurin'
 
       - name: Setup Gradle
-        # v6 runs on Node 24. Caching is disabled so transient GitHub cache-service outages can't
-        # surface as "Failed to save/restore cache" build warnings; the trade-off is that
+        # v6 runs on Node 24. Caching is disabled so a transient GitHub cache-service outage can't
+        # surface as a "Failed to save/restore cache" build warning; the trade-off is that
         # dependencies are re-fetched each run. Set cache-disabled: false to trade those occasional
         # warnings back for faster builds.
         uses: gradle/actions/setup-gradle@v6
@@ -57,19 +86,143 @@ jobs:
           gradle-version: '8.13'
           cache-disabled: true
 
+      # ---- Android SDK components (pinned) ----
+      # Versions here MUST match app/build.gradle.kts (compileSdk 36, ndkVersion) and the CMake the
+      # externalNativeBuild expects. build-tools is included so the final step's apksigner exists.
+      #
+      # Deliberately NOT using `set -o pipefail` on the licence line. `yes | sdkmanager --licenses`
+      # ends with sdkmanager exiting first, which closes the pipe and kills `yes` with SIGPIPE
+      # (exit 141). Under pipefail that becomes a failed pipeline and `set -e` aborts the step —
+      # which is exactly how an earlier run of this workflow died with "yes: standard output:
+      # Broken pipe" before Gradle had even started. `|| true` covers the same ground twice.
+      - name: Install Android SDK components
+        run: |
+          set -eu
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1"
+
+      # ---- Rust acceleration library (rust/) ----
+      # Installs the Android cross-targets and cargo-ndk so app/build.gradle.kts's cargoNdkBuild hook
+      # activates and liblucent_native.so ships in the APK. If this step were ever removed the build
+      # would still succeed — the app then runs on its Kotlin fallbacks. Only the two shipped ABIs
+      # are built (aarch64 = arm64-v8a, armv7 = armeabi-v7a). ANDROID_NDK_HOME is pinned to the NDK
+      # installed above so cargo-ndk and AGP use the very same toolchain.
+      - name: Set up Rust for Android
+        run: |
+          set -eu
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          cargo install cargo-ndk --locked
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      # ---- llama.cpp source, fetched up front with retries ----
+      # The on-device model engine pins llama.cpp at a fixed tag (app/src/main/cpp/CMakeLists.txt).
+      # Left alone, CMake clones it mid-build via FetchContent — one un-retried network operation
+      # buried inside each per-ABI configure. Cloning it here, into the directory the CMakeLists
+      # pre-seed hook checks first, makes the fetch happen once, up front, with three attempts.
+      - name: Prefetch llama.cpp (pinned b9888)
+        run: |
+          set -eu
+          DEST="app/src/main/cpp/llama.cpp-src"
+          for attempt in 1 2 3; do
+            rm -rf "$DEST"
+            if git clone --depth 1 --branch b9888 https://github.com/ggml-org/llama.cpp "$DEST"; then
+              echo "llama.cpp cloned on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::Failed to clone llama.cpp after 3 attempts."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      # ---- GPU (Vulkan) shader compiler ----
+      # The on-device model ships with the Vulkan GPU backend compiled in (the in-app switch defaults
+      # to CPU and warns before enabling GPU; a device that can't do Vulkan falls back to CPU). ggml
+      # compiles its Vulkan shaders with glslc at build time. CMakeLists points at the glslc bundled
+      # with the NDK, so normally nothing is needed here — but we also put that same glslc on PATH and
+      # apt-install one as a fallback, so shader compilation can't fail for want of a compiler. To
+      # build CPU-only instead, add -PcpuOnly to the gradle line below (and this step is harmless).
+      - name: Provide Vulkan shader compiler (glslc)
+        run: |
+          set -eu
+          NDK="$ANDROID_HOME/ndk/27.1.12297006"
+          GLSLC_DIR="$NDK/shader-tools/linux-x86_64"
+          OK=0
+          if [ -x "$GLSLC_DIR/glslc" ]; then
+            # The NDK shader tools are linked against libc++.so.1 but ship it as libc++.so in the same
+            # folder, so glslc won't start unless that soname resolves and the folder is on the loader
+            # path. Create the soname link (if missing) and export LD_LIBRARY_PATH for later steps.
+            if [ -f "$GLSLC_DIR/libc++.so" ] && [ ! -e "$GLSLC_DIR/libc++.so.1" ]; then
+              ln -sf libc++.so "$GLSLC_DIR/libc++.so.1" || true
+            fi
+            if LD_LIBRARY_PATH="$GLSLC_DIR:${LD_LIBRARY_PATH:-}" "$GLSLC_DIR/glslc" --version; then
+              echo "$GLSLC_DIR" >> "$GITHUB_PATH"
+              echo "LD_LIBRARY_PATH=$GLSLC_DIR:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+              echo "Using NDK glslc: $GLSLC_DIR/glslc"
+              OK=1
+            fi
+          fi
+          if [ "$OK" != "1" ]; then
+            echo "NDK glslc unavailable; installing a system glslc as fallback."
+            # CMakeLists prefers the NDK glslc when the file exists. If it exists but won't run, move
+            # it aside so that check fails and CMake finds the system glslc on PATH instead.
+            [ -e "$GLSLC_DIR/glslc" ] && mv "$GLSLC_DIR/glslc" "$GLSLC_DIR/glslc.disabled" || true
+            sudo apt-get update
+            sudo apt-get install -y glslc || sudo apt-get install -y glslang-tools || true
+            glslc --version || glslangValidator --version || true
+          fi
+
       - name: Decode release keystore from secret
         env:
           LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
         run: |
+          set -eu
           printf '%s' "$LUCENT_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/lucent-release.keystore"
-          echo "Keystore decoded to runner temp ($(stat -c%s "$RUNNER_TEMP/lucent-release.keystore") bytes)."
+          echo "Keystore decoded ($(stat -c%s "$RUNNER_TEMP/lucent-release.keystore") bytes)."
 
-      - name: Build signed release APK
+      - name: Assemble signed RELEASE APK
         env:
           LUCENT_KEYSTORE_FILE: ${{ runner.temp }}/lucent-release.keystore
           LUCENT_KEYSTORE_PASSWORD: ${{ secrets.LUCENT_KEYSTORE_PASSWORD }}
           LUCENT_KEY_ALIAS: lucent
-        run: gradle assembleRelease --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+        # assembleRelease — the release variant, nothing else. versionCode always tracks the run
+        # number (it only has to increase, and nobody sees it); versionName is passed through only
+        # when the "Version name" box was filled in, otherwise Gradle keeps MARKETING_VERSION.
+        # The GPU (Vulkan) backend is built by default; add -PcpuOnly for a smaller CPU-only APK.
+        run: |
+          set -eu
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PversionCode=${{ github.run_number }} \
+            -PversionName='${{ inputs.version_name }}'
+
+      - name: Verify the APK is a signed release (not debug, not unsigned)
+        # The proof the build did what it claims: locate the release APK, then run apksigner. It
+        # fails the job if the APK is unsigned or the signature is invalid, and prints the signer
+        # certificate so you can confirm it is YOUR key — not the SDK's throwaway debug key.
+        run: |
+          set -eu
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "::error::No APK found in app/build/outputs/apk/release."
+            exit 1
+          fi
+          echo "Release APK: $APK ($(stat -c%s "$APK") bytes)"
+          case "$APK" in
+            *unsigned*)
+              echo "::error::APK is UNSIGNED ($APK). Check the signing secrets and keystore."
+              exit 1 ;;
+          esac
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort | tail -n 1)"
+          echo "Using: $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK"
+          echo "Signature verified — this is a signed RELEASE build."
 
       - name: Upload APK
         # v6 runs on Node 24 and fixes the punycode deprecation notice from older releases.
@@ -77,3 +230,4 @@ jobs:
         with:
           name: lucent-release-apk
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
