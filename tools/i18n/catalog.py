@@ -70,6 +70,14 @@ ENTRIES = [
     ("themeMonetMorningDesc", "Pale morning blue — a light theme", "浅浅的晨曦蓝 — 浅色主题", "淡い朝の青 — ライトテーマ", "옅은 아침 파랑 — 라이트 테마"),
     ("themeMonetWisteria", "Monet wisteria", "莫奈·紫藤", "モネ・藤", "모네 등나무"),
     ("themeMonetWisteriaDesc", "Pale wisteria — a light theme", "浅浅的紫藤色 — 浅色主题", "淡い藤色 — ライトテーマ", "옅은 등나무색 — 라이트 테마"),
+    ("themeMonetNight", "Monet nightfall", "莫奈·夜幕", "モネ・宵闇", "모네 야경"),
+    ("themeMonetNightDesc", "Deep evening blue — a dark theme", "深邃的傍晚蓝 — 深色主题", "深い宵の青 — ダークテーマ", "깊은 저녁 블루 — 다크 테마"),
+    ("themeMonetPine", "Monet deep garden", "莫奈·深园", "モネ・深緑の庭", "모네 깊은 정원"),
+    ("themeMonetPineDesc", "Deep garden green — a dark theme", "深邃的花园绿 — 深色主题", "深い庭の緑 — ダークテーマ", "깊은 정원 그린 — 다크 테마"),
+    ("themeMonetPlum", "Monet dusk wisteria", "莫奈·暮紫", "モネ・暮れの藤", "모네 황혼 등나무"),
+    ("themeMonetPlumDesc", "Deep wisteria plum — a dark theme", "深邃的紫藤紫 — 深色主题", "深い藤紫 — ダークテーマ", "깊은 등나무 자주 — 다크 테마"),
+    ("themeMonetEmber", "Monet embers", "莫奈·余烬", "モネ・残り火", "모네 잔불"),
+    ("themeMonetEmberDesc", "Deep haystack amber — a dark theme", "深邃的麦垛琥珀 — 深色主题", "深い干し草の琥珀 — ダークテーマ", "깊은 건초 앰버 — 다크 테마"),
 
     # ---- Note colours ----
     ("colorDefault", "Default", "默认", "デフォルト", "기본"),
@@ -117,6 +125,7 @@ ENTRIES = [
 
     # ---- Splash ----
     ("tapToSkip", "Tap to skip", "点按跳过", "タップでスキップ", "탭하여 건너뛰기"),
+    ("skipAnimation", "Skip", "跳过", "スキップ", "건너뛰기"),
 
     # ---- Share intake ----
     ("sharedDefaultTitle", "Shared", "分享内容", "共有", "공유됨"),
@@ -131,6 +140,16 @@ ENTRIES = [
     ("selectAll", "Select all", "全选", "すべて選択", "모두 선택"),
     ("selectAllMatching", "Select all matching", "全选匹配项", "一致する項目をすべて選択", "일치 항목 모두 선택"),
     ("nSelected(count: Int)", "{count} selected", "已选择 {count} 项", "{count}件を選択中", "{count}개 선택됨"),
+    # Note/task body statistics (paragraph & character count, word count, reading time). Singular and
+    # plural are separate keys so English reads correctly ("1 paragraph" vs "3 paragraphs"); CJK has no
+    # inflection so both forms are the same phrase.
+    ("statParagraphsOne", "1 paragraph", "1 段落", "1 段落", "단락 1개"),
+    ("statParagraphsN(n: Int)", "{n} paragraphs", "{n} 段落", "{n} 段落", "단락 {n}개"),
+    ("statCharactersOne", "1 character", "1 字", "1 文字", "1자"),
+    ("statCharactersN(n: Int)", "{n} characters", "{n} 字", "{n} 文字", "{n}자"),
+    ("statWordsOne", "1 word", "1 词", "1 単語", "단어 1개"),
+    ("statWordsN(n: Int)", "{n} words", "{n} 词", "{n} 単語", "단어 {n}개"),
+    ("statMinRead(n: Int)", "{n} min read", "阅读约 {n} 分钟", "約{n}分で読了", "{n}분 분량"),
     ("labelFormat", "Format", "格式", "形式", "형식"),
     ("exportNSelected(count: Int)", "Export {count} selected", "导出所选 {count} 项", "選択した{count}件をエクスポート", "선택한 {count}개 내보내기"),
 
@@ -505,8 +524,13 @@ ENTRIES = [
     ("settingsApiSub(active: String)", "Selection and connection · active: {active}", "选择与连接 · 当前：{active}", "選択と接続 · 使用中：{active}", "선택 및 연결 · 사용 중: {active}"),
     ("settingsMemoryWebTitle", "Memory & web", "记忆与联网", "記憶とウェブ", "메모리 및 웹"),
     ("settingsMemoryWebSub", "How much it remembers · web search", "记住多少内容 · 网络搜索", "どこまで覚えるか · ウェブ検索", "기억 범위 · 웹 검색"),
-    ("settingsLocalModelTitle", "Local model (GGUF)", "本地模型（GGUF）", "ローカルモデル（GGUF）", "로컬 모델(GGUF)"),
+    ("settingsMemoryTitle", "Memory", "记忆", "記憶", "메모리"),
+    ("settingsMemorySub", "How much past conversation it remembers", "记住多少历史对话", "どこまで会話を覚えるか", "얼마나 많은 대화를 기억하는지"),
+    ("settingsNetworkTitle", "Networking", "联网", "ネットワーク", "네트워크"),
+    ("settingsNetworkSub", "Web search for the cloud assistant", "云端助手的联网搜索", "クラウドアシスタントのウェブ検索", "클라우드 어시스턴트 웹 검색"),
+    ("settingsLocalModelTitle", "Local model", "本地模型", "ローカルモデル", "로컬 모델"),
     ("settingsLocalModelSub", "Run the assistant on-device, no API needed", "在设备上本地运行助手，无需 API", "端末上でアシスタントを実行、API不要", "기기에서 어시스턴트 실행, API 불필요"),
+    ("lmExperimentalNote", "Experimental — on-device inference is new and can be slow or unstable on some phones.", "实验性功能——端侧推理尚在早期，在部分手机上可能较慢或不稳定。", "実験的機能 — 端末上での推論はまだ新しく、一部の端末では遅かったり不安定な場合があります。", "실험적 기능 — 온디바이스 추론은 아직 초기 단계로 일부 기기에서는 느리거나 불안정할 수 있습니다."),
 
     # =====================================================================================
     # Settings — Local model (GGUF) page
@@ -519,6 +543,7 @@ ENTRIES = [
     ("lmToolsWarnTitle", "Allow the local model to use tools?", "允许本地模型使用工具？", "ローカルモデルにツールの使用を許可しますか？", "로컬 모델이 도구를 사용하도록 허용할까요?"),
     ("lmToolsWarnBody", "The on-device assistant will be able to create and edit your notes and tasks. This adds extra processing to each reply, so it can be slower on older phones, and very small models may not follow it reliably. You can turn it off any time.", "本地助手将能够新建和编辑你的笔记与任务。这会给每次回复增加额外计算，旧手机上可能变慢，非常小的模型也可能无法稳定遵循。你可以随时关闭。", "オンデバイスのアシスタントがメモやタスクを作成・編集できるようになります。返信ごとに処理が増えるため古い端末では遅くなることがあり、とても小さいモデルでは正しく従えない場合があります。いつでもオフにできます。", "온디바이스 어시스턴트가 메모와 할 일을 만들고 편집할 수 있게 됩니다. 답변마다 처리가 늘어 오래된 기기에서는 느려질 수 있고, 아주 작은 모델은 안정적으로 따르지 못할 수 있습니다. 언제든지 끌 수 있습니다."),
     ("lmGpuToggle", "Use the GPU (experimental)", "使用 GPU（实验性）", "GPUを使用（実験的）", "GPU 사용(실험적)"),
+    ("lmGpuNeedsModel", "Import a model first to choose the GPU.", "请先导入模型，才能选择使用 GPU。", "GPUを選ぶには、まずモデルをインポートしてください。", "GPU를 선택하려면 먼저 모델을 가져오세요."),
     ("lmGpuToggleDesc", "Off by default — the CPU is used, which runs on every device and is the most stable. The GPU can be faster on some phones but may be unstable.", "默认关闭——使用 CPU，兼容所有设备且最稳定。GPU 在部分手机上更快，但可能不稳定。", "デフォルトはオフ——CPUを使用し、あらゆる端末で動作し最も安定します。GPUは一部の端末で高速ですが、不安定な場合があります。", "기본값은 꺼짐 — CPU를 사용하며 모든 기기에서 작동하고 가장 안정적입니다. GPU는 일부 기기에서 더 빠르지만 불안정할 수 있습니다."),
     ("lmGpuWarnTitle", "Switch the local model to the GPU?", "将本地模型切换到 GPU？", "ローカルモデルをGPUに切り替えますか？", "로컬 모델을 GPU로 전환할까요?"),
     ("lmGpuWarnBody", "GPU (Vulkan) acceleration can be faster on some devices, but graphics drivers vary and it may be less stable on others. If your device can't run it, the model automatically falls back to the CPU. The CPU option is the safest and works everywhere. You can switch back any time.", "GPU（Vulkan）加速在部分设备上更快，但显卡驱动差异大，在另一些设备上可能不太稳定。如果你的设备无法运行，模型会自动回退到 CPU。CPU 最稳、处处可用。你可以随时切回。", "GPU（Vulkan）アクセラレーションは一部の端末で高速ですが、グラフィックスドライバーは端末ごとに異なり、安定しない場合があります。実行できない端末では自動的にCPUに戻ります。CPUが最も安全で、どの端末でも動作します。いつでも戻せます。", "GPU(Vulkan) 가속은 일부 기기에서 더 빠르지만, 그래픽 드라이버가 기기마다 달라 덜 안정적일 수 있습니다. 기기가 실행할 수 없으면 모델이 자동으로 CPU로 되돌아갑니다. CPU가 가장 안전하고 모든 기기에서 작동합니다. 언제든지 되돌릴 수 있습니다."),
@@ -538,6 +563,29 @@ ENTRIES = [
     ("lmDeletedToast", "Model deleted.", "模型已删除。", "モデルを削除しました。", "모델을 삭제했습니다."),
     ("lmUnsupportedAbiNote", "This device's processor isn't supported by the local model engine, so this feature is unavailable here.", "此设备的处理器不受本地模型引擎支持，因此该功能在此设备上不可用。", "この端末のプロセッサはローカルモデルエンジンに対応していないため、この機能は利用できません。", "이 기기의 프로세서는 로컬 모델 엔진에서 지원되지 않아 이 기능을 사용할 수 없습니다."),
     ("lmSizeHint", "Tip: on most phones, models around 1–4 GB (Q4 quantization) give the best balance of speed and quality.", "提示：在大多数手机上，约 1–4 GB（Q4 量化）的模型在速度与质量之间平衡最佳。", "ヒント：多くのスマートフォンでは、約1〜4 GB（Q4量子化）のモデルが速度と品質のバランスに優れています。", "팁: 대부분의 휴대폰에서는 약 1–4GB(Q4 양자화) 모델이 속도와 품질의 균형이 가장 좋습니다."),
+
+    # ---- Local model: multiple models, custom names, active selection (task requirement) ----
+    ("lmModelsTitle", "Local models", "本地模型", "ローカルモデル", "로컬 모델"),
+    ("lmActiveTag", "Active", "使用中", "使用中", "사용 중"),
+    ("lmRenameA11y", "Rename model", "重命名模型", "モデルの名前を変更", "모델 이름 바꾸기"),
+    ("lmDeleteA11y", "Delete model", "删除模型", "モデルを削除", "모델 삭제"),
+    ("lmSlotsFullHint(max: Int)", "You've imported the maximum of {max} models. Delete one to add another.", "已导入上限 {max} 个模型。删除一个后才能再添加。", "モデルは上限の{max}個までインポート済みです。追加するには1つ削除してください。", "모델을 최대 {max}개까지 가져왔습니다. 추가하려면 하나를 삭제하세요."),
+    ("lmImportFailedTooMany(max: Int)", "You can keep at most {max} models. Delete one before importing another.", "最多只能保存 {max} 个模型。请先删除一个再导入。", "モデルは最大{max}個まで保存できます。別のものをインポートする前に1つ削除してください。", "모델은 최대 {max}개까지 보관할 수 있습니다. 다른 모델을 가져오기 전에 하나를 삭제하세요."),
+    ("lmNameModelTitle", "Name this model", "为该模型命名", "このモデルに名前を付ける", "이 모델 이름 지정"),
+    ("lmNameModelBody", "Give this model a name so you can tell it apart from your other local models.", "给它起个名字，方便与你的其他本地模型区分。", "他のローカルモデルと区別できるよう、名前を付けてください。", "다른 로컬 모델과 구분할 수 있도록 이름을 지정하세요."),
+    ("lmModelNameField", "Model name", "模型名称", "モデル名", "모델 이름"),
+    ("lmImportConfirm", "Import", "导入", "インポート", "가져오기"),
+    ("lmRenameTitle", "Rename model", "重命名模型", "モデルの名前を変更", "모델 이름 바꾸기"),
+    ("lmLoadingIndicator", "Loading the local model…", "正在加载本地模型……", "ローカルモデルを読み込み中…", "로컬 모델을 불러오는 중…"),
+
+    # ---- Local model: warn before turning the whole feature on (freezes the API; heavy on RAM) ----
+    ("lmUseLocalWarnTitle", "Turn on the local model?", "开启本地模型？", "ローカルモデルをオンにしますか？", "로컬 모델을 켤까요?"),
+    ("lmUseLocalWarnBody", "While the local model is on, the cloud API is frozen and won't be called — the assistant answers entirely on this device. Running a model uses a lot of memory (RAM), so it's best not to close the app while it's replying: quitting interrupts the reply. Closing the app also frees that memory. You can turn this off any time to go back to the cloud API.", "开启本地模型后，云端 API 将被冻结、不再调用——助手完全在本设备上作答。运行模型会占用大量运行内存（RAM），因此在它回复期间最好不要退出应用：退出会中断回复。退出应用也会释放这部分内存。你可以随时关闭以切回云端 API。", "ローカルモデルがオンの間、クラウドAPIは凍結され呼び出されません。アシスタントはこの端末上だけで応答します。モデルの実行は多くのメモリ（RAM）を使うため、応答中はアプリを閉じないことをおすすめします。終了すると応答が中断されます。アプリを閉じるとそのメモリも解放されます。いつでもオフにしてクラウドAPIに戻せます。", "로컬 모델이 켜져 있는 동안 클라우드 API는 동결되어 호출되지 않습니다. 어시스턴트는 이 기기에서만 답변합니다. 모델 실행은 많은 메모리(RAM)를 사용하므로 답변 중에는 앱을 닫지 않는 것이 좋습니다. 종료하면 답변이 중단됩니다. 앱을 닫으면 그 메모리도 해제됩니다. 언제든지 꺼서 클라우드 API로 돌아갈 수 있습니다."),
+
+    # ---- API page: frozen banner while local model mode is on ----
+    ("apiFrozenTitle", "Cloud API frozen", "云端 API 已冻结", "クラウドAPIは凍結中", "클라우드 API 동결됨"),
+    ("apiFrozenBody", "Local model mode is on, so the assistant answers on-device and the cloud API is not used. Saving and fetching models are disabled here until you turn the local model off.", "本地模型模式已开启，助手将在本设备上作答，云端 API 不会被使用。在关闭本地模型前，此页的保存和获取模型已禁用。", "ローカルモデルモードがオンのため、アシスタントは端末上で応答し、クラウドAPIは使用されません。ローカルモデルをオフにするまで、このページの保存とモデル取得は無効です。", "로컬 모델 모드가 켜져 있어 어시스턴트가 기기에서 답변하며 클라우드 API는 사용되지 않습니다. 로컬 모델을 끌 때까지 이 페이지의 저장과 모델 가져오기는 비활성화됩니다."),
+    ("apiFrozenManage", "Local model settings", "本地模型设置", "ローカルモデル設定", "로컬 모델 설정"),
 
     # =====================================================================================
     # Settings — Personalization page
@@ -602,6 +650,8 @@ ENTRIES = [
     ("settingsThemeSub", "Light, dark, the system, or a Monet tint", "浅色、深色、跟随系统或莫奈色调", "ライト・ダーク・システム・モネ調", "라이트, 다크, 시스템 또는 모네 톤"),
     ("settingsBackgroundTitle", "Background", "背景", "背景", "배경"),
     ("settingsBackgroundSub", "Colour palette behind the glass", "玻璃背后的配色", "ガラス越しのカラーパレット", "글래스 뒤의 색상 팔레트"),
+    ("backgroundAnimationTitle", "Drifting background", "背景浮动效果", "背景のドリフト", "배경 흐름 효과"),
+    ("backgroundAnimationDesc", "Let the colour blobs drift and merge. Turn off for a still, flat theme colour.", "让色块漂浮融合。关闭则为静态的纯主题色。", "色のブロブが漂って溶け合います。オフにすると静止した単色の背景になります。", "색 덩어리가 흐르며 어우러집니다. 끄면 정지된 단색 배경이 됩니다."),
     ("settingsFontTitle", "Font", "字体", "フォント", "글꼴"),
     ("fontSystemLabel", "System", "系统", "システム", "시스템"),
     ("fontGroupEnglish", "English", "英文", "英語", "영어"),
@@ -637,7 +687,11 @@ ENTRIES = [
     ("lockErrNeedAnswer", "Enter an answer to your security question.", "请输入安全问题的答案。", "セキュリティの質問の答えを入力してください。", "보안 질문의 답변을 입력해 주세요."),
     ("lockErrNeedQuestion", "Enter the question this answer belongs to.", "请输入该答案对应的问题。", "この答えに対応する質問を入力してください。", "이 답변에 해당하는 질문을 입력해 주세요."),
     ("turnOn", "Turn on", "开启", "オンにする", "켜기"),
+    ("turnOff", "Turn off", "关闭", "オフにする", "끄기"),
     ("appLockOnToast", "App lock is on.", "应用锁已开启。", "アプリロックをオンにしました。", "앱 잠금이 켜졌습니다."),
+    ("appLockOffToast", "App lock is off.", "应用锁已关闭。", "アプリロックをオフにしました。", "앱 잠금이 꺼졌습니다."),
+    ("appLockDisableTitle", "Turn off app lock?", "关闭应用锁？", "アプリロックをオフにしますか？", "앱 잠금을 끄시겠어요?"),
+    ("appLockDisableBody", "Without the lock, anyone who opens Lucent can read your notes and tasks — no password required. Enter your current password to confirm.", "关闭后，任何人打开 Lucent 都能无需密码查看你的笔记和任务。请输入当前密码以确认。", "ロックを解除すると、Lucent を開いた人は誰でもパスワードなしでメモやタスクを見られます。確認のため現在のパスワードを入力してください。", "잠금을 끄면 Lucent를 여는 누구나 비밀번호 없이 메모와 할 일을 볼 수 있습니다. 확인을 위해 현재 비밀번호를 입력하세요."),
     ("noRecoveryTitle", "Turn on without a way to reset it?", "在没有重置途径的情况下开启？", "リセット手段なしでオンにしますか？", "재설정 방법 없이 켤까요?"),
     ("noRecoveryBody", "Without a security question there is no password reset. If you forget this password, the only way back into Lucent is to clear all data — every note, task, attachment and conversation on this device, permanently. Nobody, including the app itself, can recover it for you, because the password is never stored anywhere.", "没有安全问题就无法重置密码。如果忘记此密码，唯一能重新进入 Lucent 的方式就是清除所有数据——此设备上的每条笔记、任务、附件和会话都将被永久删除。包括应用本身在内，没有任何人能为你找回密码，因为它从未被存储在任何地方。", "セキュリティの質問がないと、パスワードのリセット手段はありません。このパスワードを忘れた場合、Lucentに戻る唯一の方法は全データの消去です。この端末上のすべてのメモ・タスク・添付ファイル・会話が完全に削除されます。パスワードはどこにも保存されないため、アプリ自身を含め誰も復元できません。", "보안 질문이 없으면 비밀번호를 재설정할 수 없습니다. 이 비밀번호를 잊으면 Lucent로 돌아갈 유일한 방법은 전체 데이터 삭제뿐입니다. 이 기기의 모든 노트, 할 일, 첨부 파일, 대화가 영구적으로 삭제됩니다. 비밀번호는 어디에도 저장되지 않으므로 앱 자체를 포함해 누구도 복구해 줄 수 없습니다."),
     ("turnOnAnyway", "Turn on anyway", "仍然开启", "それでもオンにする", "그래도 켜기"),
@@ -651,6 +705,7 @@ ENTRIES = [
     ("shareWarnTitle", "Make Lucent a share target?", "将 Lucent 设为分享目标？", "Lucentを共有先にしますか？", "Lucent를 공유 대상으로 만들까요?"),
     ("shareWarnBody", "This makes Lucent appear in other apps' share sheets so you can send text and files into it. It's the one place Lucent becomes visible to other apps. Anything you choose to share INTO Lucent is copied into your encrypted database like any other note or task; Lucent still sends nothing out on its own. You can turn this off again at any time, and it's off until you confirm.", "这会让 Lucent 出现在其他应用的分享面板中，以便向其发送文字和文件。这是 Lucent 对其他应用可见的唯一场合。你选择分享进 Lucent 的内容会像普通笔记或任务一样复制进加密数据库；Lucent 自身仍然不会向外发送任何内容。你可以随时再次关闭，且在确认之前保持关闭。", "他のアプリの共有シートにLucentが表示され、テキストやファイルを送り込めるようになります。Lucentが他のアプリから見えるのはこの場面だけです。Lucentへ共有した内容は、他のメモやタスクと同様に暗号化データベースへコピーされます。Lucent自身が外へ何かを送ることはありません。いつでも再びオフにでき、確認するまではオフのままです。", "다른 앱의 공유 시트에 Lucent가 표시되어 텍스트와 파일을 보낼 수 있게 됩니다. Lucent가 다른 앱에 보이는 것은 이 경우뿐입니다. Lucent로 공유한 내용은 다른 노트나 할 일처럼 암호화된 데이터베이스에 복사되며, Lucent 스스로 밖으로 내보내는 것은 없습니다. 언제든 다시 끌 수 있으며, 확인하기 전까지는 꺼져 있습니다."),
     ("systemIntegrationOnToast", "System integration is on.", "系统集成已开启。", "システム連携をオンにしました。", "시스템 연동이 켜졌습니다."),
+    ("systemIntegrationOffToast", "System integration is off.", "系统集成已关闭。", "システム連携をオフにしました。", "시스템 연동이 꺼졌습니다."),
     ("startupLoggingTitle", "Startup logging", "启动日志", "起動ログ", "시작 로그"),
     ("startupLoggingDesc", "Record app startup events to a local file for troubleshooting. These logs stay on this device and are never sent anywhere — the only way they leave is if you export them yourself below.", "将应用启动事件记录到本地文件以便排查问题。这些日志只保存在此设备上，绝不会被发送到任何地方——除非你在下方自行导出。", "トラブルシューティング用に、アプリの起動イベントをローカルファイルへ記録します。ログはこの端末に留まり、どこへも送信されません。外に出るのは、下であなた自身がエクスポートしたときだけです。", "문제 해결을 위해 앱 시작 이벤트를 로컬 파일에 기록합니다. 이 로그는 이 기기에만 저장되며 어디로도 전송되지 않습니다. 아래에서 직접 내보낼 때만 밖으로 나갑니다."),
     ("loggingEnabledEvent", "Logging enabled from Settings", "已在设置中开启日志", "設定でログを有効化", "설정에서 로그 사용 설정됨"),
@@ -706,9 +761,10 @@ ENTRIES = [
     # Settings — Data page: selective export + danger zone
     # =====================================================================================
     ("exportNotesTasksTitle", "Export notes & tasks", "导出笔记与任务", "メモとタスクのエクスポート", "노트 및 할 일 내보내기"),
-    ("exportNotesTasksDesc", "Write your notes or tasks to a single file you can keep or open anywhere — choose Markdown, Word, PDF, or Excel on the next screen. Pick exactly which items to include (with a search box and Select-All). These files are NOT encrypted: that is the entire point of them. Attachments are listed by name but not embedded; use the encrypted backup when you need the files themselves.", "将你的笔记或任务写入一个可随处保存和打开的文件——在下一屏选择 Markdown、Word、PDF 或 Excel。可精确挑选要包含的条目（带搜索框和全选）。这些文件不加密：这正是它们的用途所在。附件只列出名称而不嵌入；需要附件文件本身时请使用加密备份。", "メモやタスクを、どこでも保存・閲覧できる1つのファイルに書き出します。次の画面でMarkdown・Word・PDF・Excelを選べます。含める項目は検索ボックスと全選択で正確に選べます。これらのファイルは暗号化されません。それこそが目的だからです。添付ファイルは名前のみ記載され、埋め込まれません。ファイル自体が必要な場合は暗号化バックアップを使ってください。", "노트나 할 일을 어디서든 보관하고 열 수 있는 파일 하나로 내보냅니다. 다음 화면에서 마크다운, Word, PDF, Excel을 선택하세요. 포함할 항목은 검색창과 전체 선택으로 정확히 고를 수 있습니다. 이 파일들은 암호화되지 않습니다. 그것이 바로 이 기능의 목적입니다. 첨부 파일은 이름만 나열되고 포함되지 않습니다. 파일 자체가 필요하면 암호화 백업을 사용하세요."),
-    ("chooseTasksToExport", "Choose tasks to export…", "选择要导出的任务…", "エクスポートするタスクを選択…", "내보낼 할 일 선택…"),
-    ("chooseNotesToExport", "Choose notes to export…", "选择要导出的笔记…", "エクスポートするメモを選択…", "내보낼 노트 선택…"),
+    ("exportNotesTasksDesc", "Write your notes or tasks to a single file you can keep or open anywhere — choose Markdown, Word, PDF, or Excel on the next screen. Pick exactly which items to include (with a search box and Select-All). These files are NOT encrypted: that is the entire point of them. Once you tick items, you can also tick their individual attachments to bundle the actual files alongside — the export is then saved as a .zip.", "将你的笔记或任务写入一个可随处保存和打开的文件——在下一屏选择 Markdown、Word、PDF 或 Excel。可精确挑选要包含的条目（带搜索框和全选）。这些文件不加密：这正是它们的用途所在。勾选条目后，还可以逐个勾选它的附件，把附件文件本身一并打包——此时导出会保存为 .zip 压缩包。", "メモやタスクを、どこでも保存・閲覧できる1つのファイルに書き出します。次の画面でMarkdown・Word・PDF・Excelを選べます。含める項目は検索ボックスと全選択で正確に選べます。これらのファイルは暗号化されません。それこそが目的だからです。項目を選ぶと、その添付ファイルを個別に選んで実ファイルも一緒に同梱できます。その場合、エクスポートは .zip として保存されます。", "노트나 할 일을 어디서든 보관하고 열 수 있는 파일 하나로 내보냅니다. 다음 화면에서 마크다운, Word, PDF, Excel을 선택하세요. 포함할 항목은 검색창과 전체 선택으로 정확히 고를 수 있습니다. 이 파일들은 암호화되지 않습니다. 그것이 바로 이 기능의 목적입니다. 항목을 선택하면 해당 첨부 파일을 개별적으로 선택해 실제 파일까지 함께 묶을 수 있으며, 이 경우 내보내기는 .zip으로 저장됩니다."),
+    ("exportAttachmentsHint", "Tick a file to include it; tap its name to preview.", "勾选文件以包含它；点击名称可预览。", "同梱するファイルを選択。名前をタップでプレビュー。", "포함할 파일을 선택하세요. 이름을 누르면 미리보기."),
+    ("chooseTasksToExport", "Choose tasks to export", "选择要导出的任务", "エクスポートするタスクを選択", "내보낼 할 일 선택"),
+    ("chooseNotesToExport", "Choose notes to export", "选择要导出的笔记", "エクスポートするメモを選択", "내보낼 노트 선택"),
     ("exportNotesScreenTitle", "Export notes", "导出笔记", "メモをエクスポート", "노트 내보내기"),
     ("exportTasksScreenTitle", "Export tasks", "导出任务", "タスクをエクスポート", "할 일 내보내기"),
     ("exportedSelected", "Exported selected items.", "已导出所选条目。", "選択した項目をエクスポートしました。", "선택한 항목을 내보냈습니다."),
