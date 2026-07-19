@@ -1,0 +1,13 @@
+# Build outputs and local tool state — never belong in the repository.
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# Signing material. The release keystore lives in a GitHub Actions secret and in your own
+# backup, never here. This line is a safety net for git clients; the GitHub *web* uploader
+# does not read .gitignore, so the real rule is simply: never select these files when uploading.
+*.keystore
+*.jks
+keystore-base64.txt
