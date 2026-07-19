@@ -179,6 +179,33 @@ jobs:
             glslc --version || glslangValidator --version || true
           fi
 
+      # llama.cpp's Vulkan backend requires the SPIRV-Headers CMake package (find_package(SPIRV-Headers
+      # CONFIG REQUIRED)). It isn't in the NDK and isn't vendored, so install it here: it is header-only
+      # (arch-independent, used by the host-side shader generator), so a quick host install is enough.
+      # We export its config dir; app/build.gradle.kts passes it to CMake as SPIRV-Headers_DIR. A
+      # -PcpuOnly build doesn't compile the Vulkan backend, so this is harmless there.
+      - name: Provide SPIRV-Headers (for the Vulkan GPU backend)
+        run: |
+          set -eu
+          SRC="$RUNNER_TEMP/spirv-headers"
+          PREFIX="$RUNNER_TEMP/spirv-headers-install"
+          for attempt in 1 2 3; do
+            rm -rf "$SRC"
+            if git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers "$SRC"; then break; fi
+            [ "$attempt" = "3" ] && { echo "::error::Failed to clone SPIRV-Headers."; exit 1; }
+            sleep 5
+          done
+          cmake -S "$SRC" -B "$SRC/build" -DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null
+          cmake --install "$SRC/build" >/dev/null
+          CFG="$(find "$PREFIX" -name 'SPIRV-HeadersConfig.cmake' -o -name 'spirv-headers-config.cmake' | head -n 1)"
+          if [ -z "$CFG" ]; then
+            echo "::error::SPIRV-Headers installed but no config file found under $PREFIX."
+            exit 1
+          fi
+          CFG_DIR="$(dirname "$CFG")"
+          echo "LUCENT_SPIRV_HEADERS_DIR=$CFG_DIR" >> "$GITHUB_ENV"
+          echo "SPIRV-Headers config: $CFG_DIR"
+
       - name: Decode release keystore from secret
         env:
           LUCENT_KEYSTORE_BASE64: ${{ secrets.LUCENT_KEYSTORE_BASE64 }}
