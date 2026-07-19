@@ -37,7 +37,13 @@ android {
 
     defaultConfig {
         applicationId = "com.jiaying.yuan.lucentapp"
-        minSdk = 26
+        // The Vulkan GPU backend calls Vulkan 1.1 core functions (e.g. vkGetPhysicalDeviceFeatures2),
+        // which Android only exposes from API 28 (Android 9) — the NDK's API-26 libvulkan.so stub
+        // doesn't export them, so linking fails below 28. This is also what upstream llama.cpp uses to
+        // build Vulkan for Android (ANDROID_PLATFORM=android-28), and AGP derives ANDROID_PLATFORM
+        // from minSdk. So the default (GPU) build needs minSdk 28; a -PcpuOnly build has no Vulkan and
+        // keeps the wider Android 8.0 (API 26) reach.
+        minSdk = if (project.hasProperty("cpuOnly")) 26 else 28
         targetSdk = 36
         versionCode = ciVersionCode
         versionName = ciVersionName
