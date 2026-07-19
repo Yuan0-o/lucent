@@ -78,8 +78,7 @@ object AttachmentLimits {
         } else {
             Check(
                 false,
-                "That file is ${formatBytes(incoming)}, over the ${formatBytes(MAX_SINGLE_BYTES)} " +
-                    "limit for a single attachment. It wasn't added."
+                com.lucent.app.i18n.S.attachmentTooLarge(formatBytes(incoming), formatBytes(MAX_SINGLE_BYTES))
             )
         }
     }

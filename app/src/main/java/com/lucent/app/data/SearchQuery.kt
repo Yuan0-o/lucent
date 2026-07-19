@@ -343,23 +343,27 @@ data class SearchQuery(
             startOfDay(now, daysFromNow + 1) - 1
 
         /** Shown in the search help sheet. Kept next to the parser so the two can't drift apart. */
-        val HELP: List<Pair<String, String>> = listOf(
-            "milk bread" to "Both words must appear",
-            "\"shopping list\"" to "An exact phrase",
-            "tag:work  #work" to "Notes carrying that tag",
-            "is:pinned" to "Pinned items only",
-            "is:checklist" to "Checklist notes only",
-            "is:archived" to "Search inside the archive",
-            "is:done" to "Completed tasks only",
-            "is:overdue" to "Tasks past their due time",
-            "has:attachment" to "Has a file attached",
-            "has:due" to "Has a due date",
-            "has:reminder" to "Has a reminder armed",
-            "has:subtasks" to "Has subtasks",
-            "priority:high" to "none / low / medium / high",
-            "due:today" to "today / tomorrow / week / overdue",
-            "link:Recipes" to "Notes linking to [[Recipes]]"
-        )
+        // A getter, not a stored list, so the *meanings* column re-reads the active language
+        // every time the tips dialog opens (localization task). The syntax column stays literal:
+        // those are the operators the parser actually accepts.
+        val HELP: List<Pair<String, String>>
+            get() = listOf(
+                "milk bread" to com.lucent.app.i18n.S.helpBothWords,
+                "\"shopping list\"" to com.lucent.app.i18n.S.helpExactPhrase,
+                "tag:work  #work" to com.lucent.app.i18n.S.helpTag,
+                "is:pinned" to com.lucent.app.i18n.S.helpPinned,
+                "is:checklist" to com.lucent.app.i18n.S.helpChecklist,
+                "is:archived" to com.lucent.app.i18n.S.helpArchived,
+                "is:done" to com.lucent.app.i18n.S.helpDone,
+                "is:overdue" to com.lucent.app.i18n.S.helpOverdue,
+                "has:attachment" to com.lucent.app.i18n.S.helpHasAttachment,
+                "has:due" to com.lucent.app.i18n.S.helpHasDue,
+                "has:reminder" to com.lucent.app.i18n.S.helpHasReminder,
+                "has:subtasks" to com.lucent.app.i18n.S.helpHasSubtasks,
+                "priority:high" to com.lucent.app.i18n.S.helpPriority,
+                "due:today" to com.lucent.app.i18n.S.helpDue,
+                "link:Recipes" to com.lucent.app.i18n.S.helpLink
+            )
 
         private val TOKEN = Regex("\"([^\"]*)\"|(\\S+)")
 

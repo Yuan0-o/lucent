@@ -106,6 +106,12 @@ object RecoverableSecret {
     internal fun material(deviceId: String): CharArray = (PEPPER + '|' + deviceId).toCharArray()
 
     private fun deriveKey(passwordMaterial: CharArray, salt: ByteArray): SecretKey {
+        // Rust-accelerated PBKDF2 when available (see nativebridge/LucentNative): identical key
+        // bytes, so an escrow copy written by either engine opens under the other. This derivation
+        // sits on the database-recovery path, where 120,000 rounds used to be pure JVM time.
+        com.lucent.app.nativebridge.LucentNative
+            .pbkdf2Sha256(passwordMaterial, salt, PBKDF2_ITERATIONS, KEY_BITS / 8)
+            ?.let { return SecretKeySpec(it, "AES") }
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(passwordMaterial, salt, PBKDF2_ITERATIONS, KEY_BITS)
         return SecretKeySpec(factory.generateSecret(spec).encoded, "AES")

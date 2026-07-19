@@ -146,6 +146,12 @@ object BackupCrypto {
     // -----------------------------------------------------------------------------------------
 
     private fun deriveKey(passphrase: CharArray, salt: ByteArray, iterations: Int): SecretKey {
+        // Rust-accelerated PBKDF2 when available (see nativebridge/LucentNative): identical bytes
+        // out, several times faster in — which matters most right here, where a password-protected
+        // export/import pays 210,000 rounds. The JCE path below is the unchanged fallback.
+        com.lucent.app.nativebridge.LucentNative
+            .pbkdf2Sha256(passphrase, salt, iterations, KEY_BITS / 8)
+            ?.let { return SecretKeySpec(it, "AES") }
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(passphrase, salt, iterations, KEY_BITS)
         return SecretKeySpec(factory.generateSecret(spec).encoded, "AES")

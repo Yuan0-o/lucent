@@ -335,7 +335,7 @@ object BackupManager {
             // a legacy ZIP, a bare JSON, or something that isn't a Lucent backup at all — is refused
             // here rather than being parsed by a reader that no longer exists.
             ?: throw IllegalArgumentException(
-                "That isn't a Lucent .lcb backup. Only .lcb files exported by this app can be restored."
+                com.lucent.app.i18n.S.notLcbBackup
             )
 
         val manifestJson = BackupCrypto.decrypt(bytes, password).toString(Charsets.UTF_8)
@@ -572,7 +572,7 @@ object BackupManager {
             var fallbackConvId: Long? = null
             suspend fun fallbackConversation(): Long {
                 fallbackConvId?.let { return it }
-                val id = db.chatConversationDao().insert(ChatConversation(title = "Imported conversation"))
+                val id = db.chatConversationDao().insert(ChatConversation(title = com.lucent.app.i18n.S.importedConversationTitle))
                 fallbackConvId = id
                 return id
             }
@@ -642,10 +642,10 @@ object BackupManager {
             ReminderScheduler.rescheduleAll(context)
         }
 
-        val settingsNote = if (settingsRestored) " Settings restored." else ""
-        val historyNote = if (importedVersions > 0) " ($importedVersions note versions restored.)" else ""
-        val dedupNote = if (skipped > 0) " ($skipped duplicate entries skipped.)" else ""
-        return "Imported $importedNotes notes, $importedTasks tasks, $importedChats chat messages.$settingsNote$historyNote$dedupNote"
+        val settingsNote = if (settingsRestored) com.lucent.app.i18n.S.importSettingsRestored else ""
+        val historyNote = if (importedVersions > 0) com.lucent.app.i18n.S.importVersionsRestored(importedVersions) else ""
+        val dedupNote = if (skipped > 0) com.lucent.app.i18n.S.importDuplicatesSkipped(skipped) else ""
+        return com.lucent.app.i18n.S.importSummary(importedNotes, importedTasks, importedChats) + settingsNote + historyNote + dedupNote
     }
 
     /**

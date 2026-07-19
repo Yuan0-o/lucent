@@ -172,6 +172,38 @@ object FileCrypto {
         return nonce
     }
 
+    // ---- Frame primitives, Rust-accelerated (see nativebridge/LucentNative) ----
+    //
+    // AES-256-GCM is a standardized primitive: the Rust engine and javax.crypto produce
+    // byte-identical frames for identical (key, nonce, aad, data), so which one ran is
+    // undetectable in the file. The Cipher path below is kept verbatim and used whenever the
+    // native library is absent (plain-JVM unit tests, an unbundled ABI), whenever a key's raw
+    // bytes aren't extractable, or if a native call fails — behaviour is unchanged in every case.
+
+    private fun sealFrame(key: SecretKey, nonce: ByteArray, aad: ByteArray, plain: ByteArray, len: Int): ByteArray {
+        key.encoded?.let { raw ->
+            val exact = if (len == plain.size) plain else plain.copyOfRange(0, len)
+            com.lucent.app.nativebridge.LucentNative.aesGcmSeal(raw, nonce, aad, exact)?.let { return it }
+        }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, nonce))
+        cipher.updateAAD(aad)
+        return cipher.doFinal(plain, 0, len)
+    }
+
+    private fun openFrame(key: SecretKey, nonce: ByteArray, aad: ByteArray, sealed: ByteArray): ByteArray {
+        key.encoded?.let { raw ->
+            com.lucent.app.nativebridge.LucentNative.aesGcmOpen(raw, nonce, aad, sealed)?.let { return it }
+            // Null from the native open means EITHER "library unavailable" or "tag failed";
+            // both fall through to Cipher, whose own tag check reproduces the exact original
+            // accept-or-throw decision — a forged frame is still always rejected.
+        }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, nonce))
+        cipher.updateAAD(aad)
+        return cipher.doFinal(sealed)
+    }
+
     /** AAD binds the frame's position *and* its end-of-stream flag to its tag. */
     private fun aadFor(counter: Int, isFinal: Boolean) = byteArrayOf(
         if (isFinal) 1 else 0,
@@ -219,14 +251,7 @@ object FileCrypto {
         }
 
         private fun writeFrame(isFinal: Boolean) {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(
-                Cipher.ENCRYPT_MODE,
-                key,
-                GCMParameterSpec(GCM_TAG_BITS, nonceFor(noncePrefix, counter))
-            )
-            cipher.updateAAD(aadFor(counter, isFinal))
-            val sealed = cipher.doFinal(buffer, 0, filled)
+            val sealed = sealFrame(key, nonceFor(noncePrefix, counter), aadFor(counter, isFinal), buffer, filled)
 
             out.write(if (isFinal) 1 else 0)
             out.write(sealed.size ushr 24)
@@ -306,15 +331,8 @@ object FileCrypto {
             val sealed = ByteArray(length)
             readFully(`in`, sealed, length)
 
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                key,
-                GCMParameterSpec(GCM_TAG_BITS, nonceFor(noncePrefix, counter))
-            )
-            cipher.updateAAD(aadFor(counter, isFinal))
             plain = try {
-                cipher.doFinal(sealed)
+                openFrame(key, nonceFor(noncePrefix, counter), aadFor(counter, isFinal), sealed)
             } catch (t: Throwable) {
                 // Wrong key, tampered bytes, or a reordered frame. All of them mean the same thing
                 // to the caller: this data cannot be trusted, and must not be handed back.

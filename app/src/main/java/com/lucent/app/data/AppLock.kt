@@ -141,6 +141,13 @@ object AppLock {
     }
 
     private fun hash(password: CharArray, salt: ByteArray, iterations: Int): ByteArray {
+        // Rust-accelerated PBKDF2 when available (see nativebridge/LucentNative). Byte-identical
+        // output means existing stored hashes verify exactly as before; the win is that unlocking
+        // no longer spends 120,000 JVM rounds while the user stares at the lock screen. The JCE
+        // path below is kept verbatim as the fallback.
+        com.lucent.app.nativebridge.LucentNative
+            .pbkdf2Sha256(password, salt, iterations, KEY_BITS / 8)
+            ?.let { return it }
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(password, salt, iterations, KEY_BITS)
         return factory.generateSecret(spec).encoded

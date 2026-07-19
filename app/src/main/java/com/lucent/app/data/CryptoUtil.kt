@@ -32,11 +32,18 @@ object CryptoUtil {
     private const val KEY_BITS = 256
     private val PASSPHRASE = "Lucent-backup-passphrase-v1".toCharArray()
 
-    private fun deriveKey(salt: ByteArray): SecretKeySpec {
+    // Rust acceleration (see nativebridge/LucentNative + rust/src/lib.rs). PBKDF2 and AES-GCM are
+    // standardized primitives, so the Rust and JCE paths produce byte-identical output for the same
+    // input; whenever the native library is absent (unit tests, an unbundled ABI) or a call fails,
+    // the original javax.crypto code below runs instead. Format and behaviour are unchanged either
+    // way — only the time spent deriving is.
+    private fun deriveKeyBytes(salt: ByteArray): ByteArray {
+        com.lucent.app.nativebridge.LucentNative
+            .pbkdf2Sha256(PASSPHRASE, salt, PBKDF2_ITERATIONS, KEY_BITS / 8)
+            ?.let { return it }
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(PASSPHRASE, salt, PBKDF2_ITERATIONS, KEY_BITS)
-        val keyBytes = factory.generateSecret(spec).encoded
-        return SecretKeySpec(keyBytes, "AES")
+        return factory.generateSecret(spec).encoded
     }
 
     // Output layout (Base64, NO_WRAP): [ salt(16) | iv(12) | ciphertext+tag ]
@@ -45,9 +52,15 @@ object CryptoUtil {
         val random = SecureRandom()
         val salt = ByteArray(SALT_LENGTH).also { random.nextBytes(it) }
         val iv = ByteArray(IV_LENGTH).also { random.nextBytes(it) }
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, deriveKey(salt), GCMParameterSpec(GCM_TAG_BITS, iv))
-        val encrypted = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+        val keyBytes = deriveKeyBytes(salt)
+        val plain = plainText.toByteArray(Charsets.UTF_8)
+        val encrypted = com.lucent.app.nativebridge.LucentNative
+            .aesGcmSeal(keyBytes, iv, ByteArray(0), plain)
+            ?: run {
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+                cipher.doFinal(plain)
+            }
         return Base64.encodeToString(salt + iv + encrypted, Base64.NO_WRAP)
     }
 
@@ -61,9 +74,17 @@ object CryptoUtil {
             val salt = combined.copyOfRange(0, SALT_LENGTH)
             val iv = combined.copyOfRange(SALT_LENGTH, SALT_LENGTH + IV_LENGTH)
             val encrypted = combined.copyOfRange(SALT_LENGTH + IV_LENGTH, combined.size)
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, deriveKey(salt), GCMParameterSpec(GCM_TAG_BITS, iv))
-            String(cipher.doFinal(encrypted), Charsets.UTF_8)
+            val keyBytes = deriveKeyBytes(salt)
+            val plain = com.lucent.app.nativebridge.LucentNative
+                .aesGcmOpen(keyBytes, iv, ByteArray(0), encrypted)
+                ?: run {
+                    // Native unavailable (or its tag check failed) → the original Cipher path,
+                    // whose own tag verification yields the identical accept/reject decision.
+                    val cipher = Cipher.getInstance(TRANSFORMATION)
+                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+                    cipher.doFinal(encrypted)
+                }
+            String(plain, Charsets.UTF_8)
         } catch (e: Exception) {
             ""
         }
