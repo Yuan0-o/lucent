@@ -77,6 +77,11 @@ object AssistantController {
     // there's no overlap between the animation and the real reply.
     var thinking by mutableStateOf(false)
         private set
+    // True only while the on-device model is being loaded into memory (the slow first load of a
+    // multi-gigabyte file). Drives a distinct "loading the model…" line so the wait is visible and
+    // never reads as a hang. Separate from [thinking] so the UI can say *why* it is waiting.
+    var loadingModel by mutableStateOf(false)
+        private set
     var streamingText by mutableStateOf<String?>(null)
         private set
     var errorText by mutableStateOf("")
@@ -616,6 +621,7 @@ object AssistantController {
             } finally {
                 finishStream()
                 thinking = false
+                loadingModel = false
                 sending = false
                 pendingConfirmation = null
                 stopGenerationService()
@@ -666,9 +672,16 @@ object AssistantController {
         // changed since last time; a failed GPU load quietly falls back to CPU inside LocalLlm.
         com.lucent.app.local.LocalLlm.setGpuEnabled(useGpu)
 
-        // Load (or re-use) the model. First load of a multi-GB file takes real seconds; the
-        // "thinking" bubble is already showing, which is exactly the right UI for it.
-        val loaded = com.lucent.app.local.LocalLlm.ensureLoaded(ctx)
+        // Load (or re-use) the model. First load of a multi-GB file takes real seconds; surface a
+        // dedicated "loading the model…" state so the wait is visibly *loading*, not a hang. If the
+        // model is already resident (same slot, same backend) ensureLoaded returns instantly and the
+        // flag barely flickers.
+        loadingModel = true
+        val loaded = try {
+            com.lucent.app.local.LocalLlm.ensureLoaded(ctx)
+        } finally {
+            loadingModel = false
+        }
         if (!loaded) {
             thinking = false
             errorText = com.lucent.app.i18n.S.localModelLoadFailed(com.lucent.app.i18n.S.localModelLoadFailedDetail)

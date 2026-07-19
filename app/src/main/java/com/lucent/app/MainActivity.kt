@@ -241,6 +241,8 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsRepo.themeMode.collectAsState(initial = initialThemeMode)
             val paletteName by settingsRepo.palette.collectAsState(initial = initialPalette)
             val fontKey by settingsRepo.font.collectAsState(initial = initialFont)
+            // Whether the drifting background animates (task: background on/off toggle). Default on.
+            val backgroundAnimated by settingsRepo.backgroundAnimationEnabled.collectAsState(initial = true)
 
             // Keep the runtime language in step with the setting (localization task). L.current is
             // snapshot state, so this LaunchedEffect flipping it recomposes every S-reading text in
@@ -309,9 +311,9 @@ class MainActivity : ComponentActivity() {
                             // be read or interacted with. Unlocking flips the flag and the real app
                             // slides in.
                             if (AppLockController.locked) {
-                                LockScreen(paletteColors = paletteColors, backdropColor = backdropColor)
+                                LockScreen(paletteColors = paletteColors, backdropColor = backdropColor, backgroundAnimated = backgroundAnimated)
                             } else {
-                                LucentApp(paletteColors = paletteColors, backdropColor = backdropColor)
+                                LucentApp(paletteColors = paletteColors, backdropColor = backdropColor, backgroundAnimated = backgroundAnimated)
                             }
                         }
 
@@ -412,7 +414,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalHazeMaterialsApi::class)
 @Composable
-fun LucentApp(paletteColors: List<Color>, backdropColor: Color) {
+fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimated: Boolean = true) {
     // The app opens on Tasks — the leftmost tab and the requested default landing screen. Saved
     // across process death by name (rememberSaveable), so a config change or a return from the
     // background restores whatever tab the user was actually on rather than snapping back here.
@@ -527,6 +529,7 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color) {
             FluidGlassBackground(
                 palette = paletteColors,
                 backdropColor = backdropColor,
+                animated = backgroundAnimated,
                 modifier = Modifier
                     .fillMaxSize()
                     .hazeSource(state = hazeState)

@@ -90,9 +90,15 @@ private object SettingsKeys {
     val MARKDOWN_ENABLED = booleanPreferencesKey("markdown_enabled")
 
     // Whether tappable links ([[wiki]] and [text](url)) are active inside Markdown mode. A sub-toggle
-    // of Markdown: when Markdown is off there are no links regardless. Default ON so that turning
-    // Markdown on behaves exactly as it always did — links can then be turned off on their own.
+    // of Markdown: when Markdown is off there are no links regardless. Default OFF — links are now
+    // opt-in, so Markdown formatting alone never turns plain-looking text into tappable links until
+    // the user asks for it.
     val LINKS_ENABLED = booleanPreferencesKey("links_enabled")
+
+    // Whether the drifting background (the floating blobs) animates. Default ON. When OFF, the
+    // background is painted as a single flat theme colour instead — cheaper, calmer, and an option
+    // for anyone who finds motion distracting.
+    val BACKGROUND_ANIMATION_ENABLED = booleanPreferencesKey("background_animation_enabled")
 
     // ---- App Lock (task 2) — OFF by default ----
     // A boolean flag plus one encrypted blob holding the salted password/answer hashes and the
@@ -329,10 +335,17 @@ class SettingsRepository(private val context: Context) {
 
     /**
      * Whether links ([[wiki]] / [text](url)) are active. A sub-toggle of Markdown, so links are only
-     * ever live when BOTH this and [markdownEnabled] are on. Defaults to ON, which keeps the previous
-     * behaviour (links follow Markdown) until someone deliberately turns them off.
+     * ever live when BOTH this and [markdownEnabled] are on. Defaults to OFF — links are opt-in, so
+     * text stays plain until the user deliberately turns them on.
      */
-    val linksEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.LINKS_ENABLED] ?: true }
+    val linksEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.LINKS_ENABLED] ?: false }
+
+    /**
+     * Whether the drifting background animates. Default ON. When OFF the app paints a flat theme
+     * colour behind everything instead of the moving blobs.
+     */
+    val backgroundAnimationEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.BACKGROUND_ANIMATION_ENABLED] ?: true }
+    suspend fun setBackgroundAnimationEnabled(value: Boolean) { context.settingsDataStore.edit { it[SettingsKeys.BACKGROUND_ANIMATION_ENABLED] = value } }
 
     // ---- App Lock (task 2) ----
     val appLockEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.APP_LOCK_ENABLED] ?: false }

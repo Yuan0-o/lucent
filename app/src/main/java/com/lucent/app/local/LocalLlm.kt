@@ -67,7 +67,14 @@ object LocalLlm {
 
     @Volatile private var handle: Long = 0L
     @Volatile private var loadedPath: String? = null
+    // The slot id of the resident model, so a switch to a different slot forces a clean reload even
+    // if two slots ever shared a path (they don't today, but tracking the id makes the intent exact).
+    @Volatile private var loadedSlotId: String? = null
     private val generating = AtomicBoolean(false)
+    // True only while a model is actually being loaded into memory (the slow, multi-second first
+    // load). The assistant reads this to show a distinct "loading the model…" line, so the wait is
+    // visible and never looks like a hang — loading a multi-gigabyte model is expected to take time.
+    private val loading = AtomicBoolean(false)
 
     /** Offload-all sentinel for GPU mode; llama.cpp keeps on CPU any layer the device can't take. */
     private const val GPU_OFFLOAD_ALL = 999
@@ -91,6 +98,9 @@ object LocalLlm {
     /** True while a model is resident in memory. */
     fun isLoaded(): Boolean = handle != 0L
 
+    /** True while a model is being loaded into memory (used to show a "loading…" state). */
+    fun isLoading(): Boolean = loading.get()
+
     /** True while a local generation is in flight (used by Stop). */
     fun isGenerating(): Boolean = generating.get()
 
@@ -111,13 +121,23 @@ object LocalLlm {
      */
     suspend fun ensureLoaded(context: Context): Boolean = withContext(llmDispatcher) {
         if (!available) return@withContext false
-        val file = LocalModelStore.modelFile(context)
-        if (!file.exists() || file.length() == 0L) return@withContext false
-        if (handle != 0L && loadedPath == file.absolutePath && loadedGpuLayers == desiredGpuLayers) return@withContext true
+        // Load whichever slot is ACTIVE. A different active slot than the resident one is what makes
+        // "switch models" release the old and load the new: the id/path no longer match, so the block
+        // below unloads first. Only one model is ever resident.
+        val activeSlot = LocalModelStore.activeSlot(context) ?: return@withContext false
+        val file = LocalModelStore.activeModelFile(context) ?: return@withContext false
+        if (handle != 0L &&
+            loadedSlotId == activeSlot.id &&
+            loadedPath == file.absolutePath &&
+            loadedGpuLayers == desiredGpuLayers
+        ) return@withContext true
         if (handle != 0L) {
+            // A previous model is resident (a different slot, or a changed backend). Free it before
+            // the new one loads so the peak footprint is one model, not two.
             nativeUnload(handle)
             handle = 0L
             loadedPath = null
+            loadedSlotId = null
         }
         val wantGpu = desiredGpuLayers
         fun attempt(gpuLayers: Int): Long = try {
@@ -126,20 +146,26 @@ object LocalLlm {
             Log.e("LocalLlm", "load failed (gpuLayers=$gpuLayers)", t)
             0L
         }
-        var used = wantGpu
-        var h = attempt(wantGpu)
-        if (h == 0L && wantGpu > 0) {
-            // GPU offload didn't take — fall back to CPU so the feature still works.
-            Log.w("LocalLlm", "GPU load failed; falling back to CPU")
-            used = 0
-            h = attempt(0)
+        loading.set(true)
+        try {
+            var used = wantGpu
+            var h = attempt(wantGpu)
+            if (h == 0L && wantGpu > 0) {
+                // GPU offload didn't take — fall back to CPU so the feature still works.
+                Log.w("LocalLlm", "GPU load failed; falling back to CPU")
+                used = 0
+                h = attempt(0)
+            }
+            if (h != 0L) {
+                handle = h
+                loadedPath = file.absolutePath
+                loadedSlotId = activeSlot.id
+                loadedGpuLayers = used
+            }
+            h != 0L
+        } finally {
+            loading.set(false)
         }
-        if (h != 0L) {
-            handle = h
-            loadedPath = file.absolutePath
-            loadedGpuLayers = used
-        }
-        h != 0L
     }
 
     /** JNI streaming callback — the native side looks this method up by name and signature. */
@@ -208,6 +234,7 @@ object LocalLlm {
             val h = handle
             handle = 0L
             loadedPath = null
+            loadedSlotId = null
             if (h != 0L) try {
                 nativeUnload(h)
             } catch (t: Throwable) {

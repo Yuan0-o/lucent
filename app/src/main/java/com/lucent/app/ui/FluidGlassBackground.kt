@@ -131,8 +131,18 @@ private val PERIOD_ROTATE = floatArrayOf(21000f, 24000f, 27000f, 30000f, 33000f,
 fun FluidGlassBackground(
     palette: List<Color>,
     backdropColor: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    animated: Boolean = true
 ) {
+    // When the drifting effect is switched off, the background is simply the flat theme colour — no
+    // frame clock, no blobs, no offscreen layer. Cheaper and calmer for anyone who prefers stillness.
+    if (!animated) {
+        androidx.compose.foundation.layout.Box(
+            modifier = modifier.fillMaxSize().background(backdropColor)
+        )
+        return
+    }
+
     // On dark backdrops we blend blobs additively so overlaps brighten and fuse into a single
     // glowing shape; on light backdrops plain over-compositing reads better. This also decides
     // whether we need the offscreen layer at all (see class comment).
@@ -154,9 +164,16 @@ fun FluidGlassBackground(
         Array(BLOB_COUNT) { i ->
             val c = palette[i % palette.size]
             Brush.radialGradient(
-                colors = listOf(c.copy(alpha = 0.55f), c.copy(alpha = 0f)),
+                // Reaches out past the box's edge midpoints (radius 1.4 vs the old 1.0) with a gentle
+                // three-stop falloff, so the rounded-rect *silhouette itself* is what's visible — the
+                // corners no longer sit in fully-transparent gradient. That is the whole reason the
+                // square phase now actually reads as a rounded square instead of every blob looking
+                // round no matter its corner value. Still a soft glow, not a hard-edged tile, and
+                // because the shapes are more filled they now visibly fuse and part as they drift past
+                // one another rather than just sliding over each other invisibly.
+                colors = listOf(c.copy(alpha = 0.48f), c.copy(alpha = 0.34f), c.copy(alpha = 0f)),
                 center = Offset.Zero,
-                radius = 1f
+                radius = 1.4f
             )
         }
     }

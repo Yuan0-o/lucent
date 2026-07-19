@@ -1,12 +1,16 @@
 package com.lucent.app.data
 
+import com.lucent.app.i18n.S
+
 /**
  * Pure, side-effect-free text statistics for a note (or any string): word count, character counts,
  * line count, and an estimated reading time.
  *
- * No Android, no Room, no Compose — just arithmetic on a String, so it is fully unit-testable and can
- * be surfaced wherever it's useful (a note's detail view, the history screen, the assistant) without
- * each caller counting words in its own subtly different way.
+ * The *counting* is pure arithmetic on a String — no Android, no Room — so it is fully unit-testable
+ * and can be surfaced wherever it's useful (a note's detail view, the history screen, the assistant)
+ * without each caller counting words in its own subtly different way. The small [label] helpers below
+ * additionally read the i18n catalog so the unit words ("paragraphs", "characters", …) come out in
+ * the active language; the arithmetic they wrap is unchanged.
  *
  * ### Why word counting is script-aware
  *
@@ -116,23 +120,24 @@ object NoteStats {
     }
 
     /**
-     * The label shown beneath a note/task body: "3 paragraphs · 128 characters". Replaces the old
-     * word-based label, which reported "1 word" for any non-space-separated script (Chinese,
+     * The label shown beneath a note/task body: "3 paragraphs · 128 characters" (localized). Replaces
+     * the old word-based label, which reported "1 word" for any non-space-separated script (Chinese,
      * Japanese, Korean). Paragraphs and characters both count correctly in every language. Empty
-     * string for empty text so the caller shows nothing at all.
+     * string for empty text so the caller shows nothing at all. The unit words come from the i18n
+     * catalog, so the label reads naturally in the active language rather than always in English.
      */
     fun paragraphCharLabel(text: String): String {
         val stats = of(text)
         if (stats.isEmpty) return ""
-        val paraLabel = if (stats.paragraphs == 1) "1 paragraph" else "${stats.paragraphs} paragraphs"
-        val charLabel = if (stats.characters == 1) "1 character" else "${stats.characters} characters"
+        val paraLabel = if (stats.paragraphs == 1) S.statParagraphsOne else S.statParagraphsN(stats.paragraphs)
+        val charLabel = if (stats.characters == 1) S.statCharactersOne else S.statCharactersN(stats.characters)
         return "$paraLabel · $charLabel"
     }
 
-    /** A compact one-line label, e.g. "128 words · 1 min read". Empty string for empty text. */
+    /** A compact one-line label, e.g. "128 words · 1 min read" (localized). Empty for empty text. */
     fun label(stats: Stats): String {
         if (stats.isEmpty) return ""
-        val wordLabel = if (stats.words == 1) "1 word" else "${stats.words} words"
-        return "$wordLabel · ${stats.readingMinutes} min read"
+        val wordLabel = if (stats.words == 1) S.statWordsOne else S.statWordsN(stats.words)
+        return "$wordLabel · ${S.statMinRead(stats.readingMinutes)}"
     }
 }

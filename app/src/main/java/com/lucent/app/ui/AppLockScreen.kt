@@ -100,7 +100,7 @@ private enum class LockStage { ENTER_PASSWORD, ANSWER_QUESTION, SET_NEW_PASSWORD
  * counter, because the data is already encrypted at rest and a counter mostly punishes the owner.
  */
 @Composable
-fun LockScreen(paletteColors: List<Color>, backdropColor: Color) {
+fun LockScreen(paletteColors: List<Color>, backdropColor: Color, backgroundAnimated: Boolean = true) {
     val context = LocalContext.current
     val repo = remember { SettingsRepository(context) }
     val scope = rememberCoroutineScope()
@@ -120,7 +120,7 @@ fun LockScreen(paletteColors: List<Color>, backdropColor: Color) {
     var error by remember { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        FluidGlassBackground(palette = paletteColors, backdropColor = backdropColor, modifier = Modifier.fillMaxSize())
+        FluidGlassBackground(palette = paletteColors, backdropColor = backdropColor, animated = backgroundAnimated, modifier = Modifier.fillMaxSize())
         Column(
             modifier = Modifier
                 .fillMaxSize()

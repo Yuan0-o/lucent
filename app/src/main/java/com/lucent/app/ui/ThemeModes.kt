@@ -37,7 +37,13 @@ enum class LucentThemeMode(val key: String) {
     MONET_WHEAT("monet_yellow"),
     MONET_GARDEN("monet_green"),
     MONET_MORNING("monet_blue"),
-    MONET_WISTERIA("monet_purple");
+    MONET_WISTERIA("monet_purple"),
+    // Dark peers of the four Monet tints (added later): the same painterly families after dusk —
+    // deep, muted, *coloured* darks rather than the neutral near-black of [DARK]. Never true black.
+    MONET_NIGHT("monet_night"),
+    MONET_PINE("monet_pine"),
+    MONET_PLUM("monet_plum"),
+    MONET_EMBER("monet_ember");
 
     // Live i18n lookups (localization task); `label`/`detail` call sites are unchanged.
     val label: String
@@ -49,6 +55,10 @@ enum class LucentThemeMode(val key: String) {
             MONET_GARDEN -> com.lucent.app.i18n.S.themeMonetGarden
             MONET_MORNING -> com.lucent.app.i18n.S.themeMonetMorning
             MONET_WISTERIA -> com.lucent.app.i18n.S.themeMonetWisteria
+            MONET_NIGHT -> com.lucent.app.i18n.S.themeMonetNight
+            MONET_PINE -> com.lucent.app.i18n.S.themeMonetPine
+            MONET_PLUM -> com.lucent.app.i18n.S.themeMonetPlum
+            MONET_EMBER -> com.lucent.app.i18n.S.themeMonetEmber
         }
 
     val detail: String
@@ -60,6 +70,10 @@ enum class LucentThemeMode(val key: String) {
             MONET_GARDEN -> com.lucent.app.i18n.S.themeMonetGardenDesc
             MONET_MORNING -> com.lucent.app.i18n.S.themeMonetMorningDesc
             MONET_WISTERIA -> com.lucent.app.i18n.S.themeMonetWisteriaDesc
+            MONET_NIGHT -> com.lucent.app.i18n.S.themeMonetNightDesc
+            MONET_PINE -> com.lucent.app.i18n.S.themeMonetPineDesc
+            MONET_PLUM -> com.lucent.app.i18n.S.themeMonetPlumDesc
+            MONET_EMBER -> com.lucent.app.i18n.S.themeMonetEmberDesc
         }
 
     /**
@@ -69,6 +83,7 @@ enum class LucentThemeMode(val key: String) {
     fun isDark(systemDark: Boolean): Boolean = when (this) {
         SYSTEM -> systemDark
         DARK -> true
+        MONET_NIGHT, MONET_PINE, MONET_PLUM, MONET_EMBER -> true
         else -> false
     }
 
@@ -81,6 +96,10 @@ enum class LucentThemeMode(val key: String) {
         MONET_GARDEN -> Color(0xFFE9F2E5)
         MONET_MORNING -> Color(0xFFE5EDF7)
         MONET_WISTERIA -> Color(0xFFEEE9F7)
+        MONET_NIGHT -> Color(0xFF1A2136)
+        MONET_PINE -> Color(0xFF16241C)
+        MONET_PLUM -> Color(0xFF241A2E)
+        MONET_EMBER -> Color(0xFF2A1E19)
     }
 
     /**
@@ -96,6 +115,10 @@ enum class LucentThemeMode(val key: String) {
         MONET_GARDEN -> listOf(Color(0xFFF1F7EF), Color(0xFFC9DEC2))
         MONET_MORNING -> listOf(Color(0xFFEEF4FB), Color(0xFFC2D5EA))
         MONET_WISTERIA -> listOf(Color(0xFFF5F1FB), Color(0xFFD3C6EA))
+        MONET_NIGHT -> listOf(Color(0xFF2B3552), Color(0xFF141A2C))
+        MONET_PINE -> listOf(Color(0xFF25392E), Color(0xFF101B15))
+        MONET_PLUM -> listOf(Color(0xFF3A2B48), Color(0xFF1A121F))
+        MONET_EMBER -> listOf(Color(0xFF43302A), Color(0xFF1E1512))
     }
 
     companion object {

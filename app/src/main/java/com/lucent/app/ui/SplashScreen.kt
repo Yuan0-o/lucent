@@ -3,11 +3,13 @@ package com.lucent.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -71,18 +73,19 @@ object AppReady {
  *
  * ### The animation
  *
- * Five seconds, in four movements:
+ * About seven and a half seconds, in four movements:
  *
- *  1. **Arrive** (0–0.5s) — the cat pops in with a slight overshoot, the way something alive enters.
- *  2. **Wave** (0.5–2.6s) — a paw swings back and forth, the head tips with it, and there's one
- *     blink. The tilt matters more than it sounds: a paw waving on a perfectly still head reads as a
- *     machine part moving, whereas the whole body committing to the gesture reads as a greeting.
- *  3. **Become glass** (2.6–4.3s) — the solid cat cross-fades into the app's own material: a
+ *  1. **Arrive** (0–0.7s) — the cat pops in with a slight overshoot, the way something alive enters.
+ *  2. **Wave** (0.7–3.3s) — just the raised paw swings, a cheeky little "hello"; the body stays put
+ *     rather than rocking with it. Partway through, the cat closes its eyes and holds a smile for a
+ *     beat before opening them again.
+ *  3. **Become glass** (3.3–6.6s) — the solid cat cross-fades into the app's own material: a
  *     translucent pane tinted by the live palette, a bright rim, and a specular highlight that sweeps
  *     across the silhouette as it changes. It also *wobbles* — squashing and stretching, strongest at
  *     the midpoint and settling to nothing — which is what makes it read as having briefly turned to
- *     liquid rather than simply having faded.
- *  4. **Leave** (4.3–5.0s) — it floats up and dissolves, and the app is already there behind it.
+ *     liquid rather than simply having faded. This is the part worth lingering on, so it gets the
+ *     largest share of the (now longer) running time.
+ *  4. **Leave** (6.6–7.7s) — it floats up and dissolves, and the app is already there behind it.
  *
  * The cat is drawn with plain Canvas primitives — no image asset, no vector drawable — so it is a
  * few hundred bytes of code, scales to any screen without a folder of densities, and can be morphed
@@ -90,11 +93,13 @@ object AppReady {
  *
  * ### Getting out of it
  *
- * Five seconds is generous the first time and long the hundredth, so **a tap, or a back press,
- * finishes it immediately** — and the app behind is already composed, so skipping is instant rather
- * than a shortcut into more waiting. Completion is also driven by a plain `delay`, not by the frame
- * clock that drives the drawing: if that clock were ever starved the cat would freeze, and a frozen
- * splash that never ends is an app that never starts. The animation may stall; the launch may not.
+ * Seven-odd seconds is generous the first time and long the hundredth, so **the top-right "Skip"
+ * control, or a back press, finishes it immediately** — and the app behind is already composed, so
+ * skipping is instant rather than a shortcut into more waiting. A stray tap anywhere else does
+ * nothing, so the animation can't be cut short by accident. Completion is also driven by a plain
+ * `delay`, not by the frame clock that drives the drawing: if that clock were ever starved the cat
+ * would freeze, and a frozen splash that never ends is an app that never starts. The animation may
+ * stall; the launch may not.
  */
 @Composable
 fun LucentSplash(
@@ -141,9 +146,11 @@ fun LucentSplash(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            // Also swallows every touch, so nothing lands on the app composing underneath.
+            // Swallows every touch so nothing lands on the app composing underneath. It no longer
+            // *finishes* on tap, though: skipping is now an explicit control (top-right), so a stray
+            // tap can't cut the animation short by accident.
             .pointerInput(Unit) {
-                detectTapGestures(onTap = { finish() })
+                detectTapGestures(onTap = { })
             }
     ) {
         // The same living background the app itself uses, so the splash is the app arriving rather
@@ -166,9 +173,18 @@ fun LucentSplash(
         val waveT = ((t - ENTER_MS) / (MORPH_START_MS - ENTER_MS)).coerceIn(0f, 1f)
         val waveAngle = sin(waveT * WAVE_CYCLES * 2f * PI.toFloat()) * 24f * (1f - waveT * 0.35f)
 
-        // Blink: one, mid-wave. A short dip of the eyelid, not a long one — a slow blink reads sleepy.
-        val blinkPhase = ((t - BLINK_AT_MS) / BLINK_MS).coerceIn(0f, 1f)
-        val blink = if (t < BLINK_AT_MS || blinkPhase >= 1f) 0f else sin(blinkPhase * PI.toFloat())
+        // A deliberate, happy blink: the eyes close, hold shut in a smile for a beat, then open —
+        // read as "closes its eyes and smiles" rather than a quick involuntary flutter. Trapezoidal
+        // rather than a sine dip so the shut-and-smiling middle actually lingers.
+        val blink = if (t < BLINK_AT_MS) 0f else {
+            val bp = ((t - BLINK_AT_MS) / BLINK_MS).coerceIn(0f, 1f)
+            when {
+                bp < 0.28f -> bp / 0.28f            // closing
+                bp < 0.72f -> 1f                     // held shut, smiling
+                bp < 1f    -> (1f - bp) / 0.28f      // opening
+                else       -> 0f
+            }
+        }
 
         // Morph: 0 = solid cat, 1 = glass cat.
         val glass = ((t - MORPH_START_MS) / (MORPH_END_MS - MORPH_START_MS)).coerceIn(0f, 1f)
@@ -193,7 +209,8 @@ fun LucentSplash(
                     scaleY = unit * scaleIn * (1f - wobble),
                     pivot = Offset.Zero
                 )
-                rotate(degrees = waveAngle * 0.18f, pivot = Offset.Zero)
+                // The body deliberately does *not* tip with the wave any more — only the raised paw
+                // moves, which reads as a cheeky little "hello" wave rather than the whole cat rocking.
             }) {
                 drawCat(
                     glass = glassEased,
@@ -218,14 +235,23 @@ fun LucentSplash(
                 fontSize = 30.sp,
                 textAlign = TextAlign.Center
             )
-            Text(
-                com.lucent.app.i18n.S.tapToSkip,
-                color = onGradient.copy(alpha = glassEased * (1f - exitEased) * 0.35f),
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 10.dp)
-            )
         }
+
+        // Skip control: a small line of text in the top-right, present from the very first frame (its
+        // alpha does not depend on the animation's progress, only fading out as the splash itself
+        // leaves) and tappable to end the splash at once. This replaces "tap anywhere to skip" — it is
+        // deliberate and discoverable, and a stray tap elsewhere no longer cuts the animation short.
+        Text(
+            text = com.lucent.app.i18n.S.skipAnimation,
+            color = onGradient.copy(alpha = (1f - exitEased) * 0.6f),
+            fontSize = 13.sp,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 10.dp, end = 18.dp)
+                .clickable { finish() }
+                .padding(6.dp)
+        )
     }
 }
 
@@ -444,12 +470,14 @@ private fun DrawScope.drawCat(
 
 // ---- Timings, in milliseconds ----
 // One place to retune the whole sequence; every phase above is expressed against these rather than
-// against hard-coded numbers scattered through the drawing code.
-private const val TOTAL_MS = 5000f
-private const val ENTER_MS = 500f
-private const val MORPH_START_MS = 2600f
-private const val MORPH_END_MS = 4300f
-private const val EXIT_START_MS = 4300f
-private const val BLINK_AT_MS = 1500f
-private const val BLINK_MS = 260f
-private const val WAVE_CYCLES = 3.5f
+// against hard-coded numbers scattered through the drawing code. Lengthened to roughly 1.5x of the
+// original, with the glass transformation given proportionally more of that time (it is the part
+// worth lingering on).
+private const val TOTAL_MS = 7700f
+private const val ENTER_MS = 700f
+private const val MORPH_START_MS = 3300f
+private const val MORPH_END_MS = 6600f
+private const val EXIT_START_MS = 6600f
+private const val BLINK_AT_MS = 2100f
+private const val BLINK_MS = 900f
+private const val WAVE_CYCLES = 4.5f

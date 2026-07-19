@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -99,7 +100,7 @@ import kotlinx.coroutines.withContext
 //   - LocalModel: the on-device GGUF assistant — import, enable, inspect, delete. It lives under
 //     Assistant beside API and Memory, because it IS an assistant backend: the fourth answer to
 //     "where do replies come from".
-private enum class SettingsRoute { Root, Language, Assistant, Personalization, Memory, Api, LocalModel, Appearance, Theme, Background, Font, Editor, Security, Privacy, Data }
+private enum class SettingsRoute { Root, Language, Assistant, Personalization, Memory, Network, Api, LocalModel, Appearance, Theme, Background, Font, Editor, Security, Privacy, Data }
 
 /** Which kind of item the selective Markdown-export picker is currently choosing. */
 private enum class ExportKind { NOTES, TASKS }
@@ -130,9 +131,11 @@ fun SettingsScreen(active: Boolean = true) {
     val savedTypingHaptics by repo.typingHapticsEnabled.collectAsState(initial = true)
     // Editor: whether note bodies are treated as Markdown. Off by default. See SettingsRepository.
     val markdownEnabled by repo.markdownEnabled.collectAsState(initial = false)
-    // Editor: whether links are active (task 3). A sub-toggle of Markdown — only live when both are
-    // on. Defaults to on.
-    val linksEnabled by repo.linksEnabled.collectAsState(initial = true)
+    // Editor: whether links are active (task 8). A sub-toggle of Markdown — only live when both are
+    // on. Defaults to OFF (opt-in).
+    val linksEnabled by repo.linksEnabled.collectAsState(initial = false)
+    // Whether the drifting background animates (background on/off task). Default on.
+    val backgroundAnimationEnabled by repo.backgroundAnimationEnabled.collectAsState(initial = true)
     // The in-app UI language (localization task). "system" resolves against the device locale.
     val savedLanguage by repo.appLanguage.collectAsState(initial = "system")
     // Whether the assistant answers with the imported on-device model (local-model task).
@@ -187,6 +190,14 @@ fun SettingsScreen(active: Boolean = true) {
 
     // Shown when the user tries to turn the lock on with no security question (task 9).
     var showNoRecoveryWarning by remember { mutableStateOf(false) }
+
+    // Turning the lock OFF now also requires the password (task): a dialog confirms the user knows
+    // it before the protection is removed, and spells out the security risk of removing it. The
+    // credentials blob is collected here so the dialog can verify what's typed against it.
+    val appLockCreds by repo.appLockCredentials.collectAsState(initial = "")
+    var showAppLockDisable by remember { mutableStateOf(false) }
+    var disablePw by remember { mutableStateOf("") }
+    var disableError by remember { mutableStateOf("") }
 
     // System-integration privacy warning (shown before enabling the share/intent surface).
     var showShareWarning by remember { mutableStateOf(false) }
@@ -258,52 +269,110 @@ fun SettingsScreen(active: Boolean = true) {
     // --- Local model (GGUF) page state (local-model task) ---
     //
     // lmRefresh is a change counter: bumping it makes the remember()s below re-read the store, so
-    // the page reflects an import/delete immediately without any second source of truth.
+    // the page reflects an import/delete/rename/switch immediately without any second source of truth.
     var lmRefresh by remember { mutableStateOf(0) }
-    val lmHasModel = remember(lmRefresh) { LocalModelStore.hasModel(context) }
-    val lmModelName = remember(lmRefresh) { LocalModelStore.displayName(context) }
-    val lmModelSize = remember(lmRefresh) {
-        AttachmentLimits.formatBytes(LocalModelStore.modelSizeBytes(context))
-    }
+    val lmIndex = remember(lmRefresh) { LocalModelStore.index(context) }
+    val lmModels = lmIndex.slots
+    val lmActiveId = lmIndex.activeId
+    val lmHasModel = lmModels.isNotEmpty() && lmActiveId != null
+    val lmCanImportMore = lmModels.size < LocalModelStore.MAX_MODELS
     var lmImporting by remember { mutableStateOf(false) }
     var lmError by remember { mutableStateOf("") }
-    var lmConfirmDelete by remember { mutableStateOf(false) }
-    // Warning dialogs for the two opt-in local-model switches (tools, GPU). Turning either ON asks
-    // first; turning OFF is free (back to the safe default), so only the "on" path is gated.
+    // The slot the user has asked to delete, held until they confirm. Deleting always asks first.
+    var lmSlotPendingDelete by remember { mutableStateOf<LocalModelStore.ModelSlot?>(null) }
+    // The slot being renamed and the working text (null = the rename dialog is closed).
+    var lmRenameTarget by remember { mutableStateOf<LocalModelStore.ModelSlot?>(null) }
+    var lmRenameText by remember { mutableStateOf("") }
+    // A just-picked model file awaiting a name before it is imported (null = no naming dialog up).
+    // Holding the Uri lets the user label the model at import time (custom names, task requirement).
+    var lmPendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var lmImportName by remember { mutableStateOf("") }
+    // Warning dialogs for the opt-in local-model switches (use-local, tools, GPU). Turning any ON
+    // asks first; turning OFF is free (back to the safe default), so only the "on" path is gated.
     var lmConfirmToolsOn by remember { mutableStateOf(false) }
     var lmConfirmGpuOn by remember { mutableStateOf(false) }
+    // Turning "use local model" ON freezes the cloud API and pulls a multi-gigabyte model into RAM,
+    // so it warns first (API frozen, memory cost, don't quit mid-reply, quitting frees the memory).
+    var lmConfirmUseLocalOn by remember { mutableStateOf(false) }
 
     // The GGUF picker. OpenDocument with * / * because .gguf has no registered MIME type and a
     // model downloaded as a .zip must be pickable too; LocalModelStore validates the actual bytes
     // (GGUF magic, or a zip containing a .gguf) and rejects everything else with a clear message.
+    // Picking doesn't import straight away: it stages the Uri and opens a naming dialog first, so the
+    // user can label the model (custom names, task requirement). The import runs on confirm.
     val lmImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null && !lmImporting) {
-            lmImporting = true
             lmError = ""
-            scope.launch {
-                val error = withContext(Dispatchers.IO) {
-                    try {
-                        // Replacing a loaded model: free the old one's memory *before* the new
-                        // bytes land, so the peak footprint is one model, not two.
-                        LocalLlm.shutdown()
-                        LocalModelStore.import(context, uri)
-                        null
-                    } catch (e: LocalModelStore.NotGgufException) {
-                        S.lmImportFailedNotGguf
-                    } catch (e: LocalModelStore.NoGgufInZipException) {
-                        S.lmImportFailedNoGgufInZip
-                    } catch (e: Exception) {
-                        S.lmImportFailedGeneric(e.message ?: "")
-                    }
+            // Default the name to the picked file's name (minus extension); the user can edit it.
+            val picked = try {
+                context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getString(0) else null
                 }
-                lmImporting = false
-                if (error == null) {
-                    lmRefresh++
-                    LucentToast.show(context.applicationContext, S.lmImportedToast)
-                } else {
-                    lmError = error
+            } catch (_: Throwable) { null }
+            lmImportName = (picked ?: "").substringBeforeLast('.').take(60)
+            lmPendingImportUri = uri
+        }
+    }
+
+    // Run the staged import under the chosen name. Frees the resident model first so the peak
+    // footprint stays at one model, then adds the new slot (which becomes active) and refreshes.
+    fun startLocalImport(uri: Uri, name: String) {
+        if (lmImporting) return
+        lmImporting = true
+        lmError = ""
+        scope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    LocalLlm.shutdown()
+                    LocalModelStore.import(context, uri, name)
+                    null
+                } catch (e: LocalModelStore.TooManyModelsException) {
+                    S.lmImportFailedTooMany(LocalModelStore.MAX_MODELS)
+                } catch (e: LocalModelStore.NotGgufException) {
+                    S.lmImportFailedNotGguf
+                } catch (e: LocalModelStore.NoGgufInZipException) {
+                    S.lmImportFailedNoGgufInZip
+                } catch (e: Exception) {
+                    S.lmImportFailedGeneric(e.message ?: "")
                 }
             }
+            lmImporting = false
+            if (error == null) {
+                lmRefresh++
+                LucentToast.show(context.applicationContext, S.lmImportedToast)
+            } else {
+                lmError = error
+            }
+        }
+    }
+
+    // Switch the active model. Only one model is ever resident, so the currently loaded one is
+    // released immediately; the next send loads the newly selected slot. No-op if already active.
+    fun selectLocalModel(id: String) {
+        if (id == lmActiveId) return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                LocalLlm.shutdown()          // free the outgoing model's memory now
+                LocalModelStore.setActive(context, id)
+            }
+            lmRefresh++
+        }
+    }
+
+    // Delete a model slot. If it is the resident model, the engine is shut down first so a
+    // multi-gigabyte model is never left in memory with nothing on disk to reload.
+    fun deleteLocalModel(slot: LocalModelStore.ModelSlot) {
+        scope.launch {
+            val wasActive = slot.id == lmActiveId
+            withContext(Dispatchers.IO) {
+                if (wasActive) LocalLlm.shutdown()
+                LocalModelStore.delete(context, slot.id)
+                // If that was the last model, the "use local model" switch would point at nothing,
+                // so turn it off — the assistant reverts to the cloud API cleanly.
+                if (LocalModelStore.slots(context).isEmpty()) repo.setLocalModelEnabled(false)
+            }
+            lmRefresh++
+            LucentToast.show(context.applicationContext, S.lmDeletedToast)
         }
     }
 
@@ -383,12 +452,21 @@ fun SettingsScreen(active: Boolean = true) {
         AppScope.io.launch { repo.saveApiProfiles(newList, newIdx) }
     }
 
-    // Delete profile [idx]. Never removes the last one (there must always be at least one API slot).
+    // Delete profile [idx]. Deleting the FINAL profile is allowed too (task requirement): it clears
+    // that slot back to a single blank "API 1" rather than leaving the app with no API at all, so the
+    // editor stays usable and no stale connection details linger. Any other delete just drops the row.
     fun deleteProfile(idx: Int) {
-        if (profiles.size <= 1) return
+        if (idx !in profiles.indices) return
         val newList = profiles.toMutableList().also { it.removeAt(idx) }
-        val newSelected = selectedProfileIdx.coerceIn(0, newList.size - 1)
-        AppScope.io.launch { repo.saveApiProfiles(newList, newSelected) }
+        if (newList.isEmpty()) {
+            val blank = com.lucent.app.data.ApiProfile(name = "API 1")
+            url = ""; spec = "openai"; key = ""; selectedModel = ""; editingProfileName = "API 1"
+            models = emptyList()
+            AppScope.io.launch { repo.saveApiProfiles(listOf(blank), 0) }
+        } else {
+            val newSelected = selectedProfileIdx.coerceIn(0, newList.size - 1)
+            AppScope.io.launch { repo.saveApiProfiles(newList, newSelected) }
+        }
     }
 
     // Leaving the Personalization sub-screen (back arrow or system back) while dirty asks first
@@ -399,15 +477,18 @@ fun SettingsScreen(active: Boolean = true) {
     }
 
     // Where "back" goes from the current sub-route, reflecting the nesting:
-    //   Assistant > { Personalization, API, Memory & web, Local model }
-    //   Appearance > { Theme, Background, Font }
+    //   Assistant > { Personalization, API, Memory, Network, Local model }
+    //   Appearance > { Theme, Background }
+    //   Language  > { Font }
     fun goBack() {
         when (route) {
             SettingsRoute.Personalization -> leavePersonalization()
             SettingsRoute.Memory -> route = SettingsRoute.Assistant
+            SettingsRoute.Network -> route = SettingsRoute.Assistant
             SettingsRoute.Api -> route = SettingsRoute.Assistant
             SettingsRoute.LocalModel -> route = SettingsRoute.Assistant
-            SettingsRoute.Theme, SettingsRoute.Background, SettingsRoute.Font -> route = SettingsRoute.Appearance
+            SettingsRoute.Theme, SettingsRoute.Background -> route = SettingsRoute.Appearance
+            SettingsRoute.Font -> route = SettingsRoute.Language
             SettingsRoute.Language, SettingsRoute.Assistant, SettingsRoute.Appearance, SettingsRoute.Editor,
             SettingsRoute.Security, SettingsRoute.Privacy, SettingsRoute.Data -> route = SettingsRoute.Root
             else -> route = SettingsRoute.Root
@@ -899,6 +980,60 @@ fun SettingsScreen(active: Boolean = true) {
         )
     }
 
+    // --- Disable-lock confirmation (task) ---
+    //
+    // Turning the lock OFF is a security downgrade, so it is gated exactly like a login: the current
+    // password must be entered correctly before the protection is removed. The body spells out what
+    // is being given up (anyone can then read everything without a password). A wrong password shows
+    // an inline error and changes nothing; only a correct one disables the lock.
+    if (showAppLockDisable) {
+        AlertDialog(
+            onDismissRequest = { showAppLockDisable = false },
+            title = { Text(S.appLockDisableTitle) },
+            text = {
+                Column {
+                    Text(S.appLockDisableBody, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = disablePw,
+                        onValueChange = { disablePw = it; disableError = "" },
+                        label = { Text(S.lockPassword) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (disableError.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(disableError, color = Color(0xFFFF8A80), fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = disablePw.isNotEmpty() && appLockCreds.isNotEmpty(),
+                    onClick = {
+                        if (AppLock.verifyPassword(appLockCreds, disablePw)) {
+                            scope.launch { repo.setAppLock(false, "") }
+                            AppLockController.enabled = false
+                            AppLockController.unlock()
+                            disablePw = ""; disableError = ""
+                            showAppLockDisable = false
+                            LucentToast.show(context, S.appLockOffToast)
+                        } else {
+                            disableError = S.lockWrongPassword
+                        }
+                    }
+                ) { Text(S.turnOff) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    disablePw = ""; disableError = ""
+                    showAppLockDisable = false
+                }) { Text(S.actionCancel) }
+            }
+        )
+    }
+
     // --- "No security question" warning (task 9) ---
     //
     // Skipping the question is permitted, because a lock on a personal device is often protecting
@@ -1080,33 +1215,100 @@ fun SettingsScreen(active: Boolean = true) {
         )
     }
 
-    // --- Local model: delete confirmation (local-model task) ---
-    // Deleting frees the engine FIRST, then the file: unloading after deleting would leave a
-    // multi-gigabyte model resident with nothing on disk to reload, which is the worst of both.
-    if (lmConfirmDelete) {
+    // --- Local model: per-slot delete confirmation (local-model task) ---
+    // Deleting always asks first, for ANY model. If the model being deleted is the resident one the
+    // engine is freed FIRST, then the file: unloading after deleting would leave a multi-gigabyte
+    // model resident with nothing on disk to reload, which is the worst of both.
+    lmSlotPendingDelete?.let { slot ->
         AlertDialog(
-            onDismissRequest = { lmConfirmDelete = false },
+            onDismissRequest = { lmSlotPendingDelete = null },
             title = { Text(S.lmDeleteTitle) },
-            text = { Text(S.lmDeleteBody(lmModelName ?: "model.gguf")) },
+            text = { Text(S.lmDeleteBody(slot.name.ifBlank { "model.gguf" })) },
             confirmButton = {
                 TextButton(onClick = {
-                    lmConfirmDelete = false
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            LocalLlm.shutdown()
-                            LocalModelStore.delete(context)
-                            // Deleting the model also turns the routing flag off, so the app never
-                            // holds the incoherent "use local model, but there is no model" state —
-                            // the assistant reverts to the cloud API cleanly, exactly as the delete
-                            // dialog promises.
-                            repo.setLocalModelEnabled(false)
-                        }
-                        lmRefresh++
-                        LucentToast.show(appContext, S.lmDeletedToast)
-                    }
+                    deleteLocalModel(slot)
+                    lmSlotPendingDelete = null
                 }) { Text(S.actionDelete) }
             },
-            dismissButton = { TextButton(onClick = { lmConfirmDelete = false }) { Text(S.actionCancel) } }
+            dismissButton = { TextButton(onClick = { lmSlotPendingDelete = null }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // --- Local model: name a model at import time (custom names, task requirement) ---
+    // The file is already picked; this captures the label before the copy runs. Cancelling here
+    // drops the pending import entirely (nothing was copied yet).
+    lmPendingImportUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { lmPendingImportUri = null },
+            title = { Text(S.lmNameModelTitle) },
+            text = {
+                Column {
+                    Text(S.lmNameModelBody, color = onGradientMuted, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = lmImportName,
+                        onValueChange = { lmImportName = it.take(60) },
+                        label = { Text(S.lmModelNameField) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    lmPendingImportUri = null
+                    startLocalImport(uri, lmImportName)
+                }) { Text(S.lmImportConfirm) }
+            },
+            dismissButton = { TextButton(onClick = { lmPendingImportUri = null }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // --- Local model: rename an imported model ---
+    lmRenameTarget?.let { slot ->
+        AlertDialog(
+            onDismissRequest = { lmRenameTarget = null },
+            title = { Text(S.lmRenameTitle) },
+            text = {
+                OutlinedTextField(
+                    value = lmRenameText,
+                    onValueChange = { lmRenameText = it.take(60) },
+                    label = { Text(S.lmModelNameField) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = slot.id
+                    val newName = lmRenameText
+                    lmRenameTarget = null
+                    scope.launch {
+                        withContext(Dispatchers.IO) { LocalModelStore.rename(context, id, newName) }
+                        lmRefresh++
+                    }
+                }) { Text(S.actionSave) }
+            },
+            dismissButton = { TextButton(onClick = { lmRenameTarget = null }) { Text(S.actionCancel) } }
+        )
+    }
+
+    // --- Local model: warn before turning "use local model" ON ---
+    // Enabling local mode freezes the cloud API and loads a multi-gigabyte model into RAM, so it
+    // spells out the consequences first: the API stops being called, memory use is high, quitting the
+    // app mid-reply interrupts the answer, and quitting frees that memory. Confirming enables it.
+    if (lmConfirmUseLocalOn) {
+        AlertDialog(
+            onDismissRequest = { lmConfirmUseLocalOn = false },
+            title = { Text(S.lmUseLocalWarnTitle) },
+            text = { Text(S.lmUseLocalWarnBody) },
+            confirmButton = {
+                TextButton(onClick = {
+                    lmConfirmUseLocalOn = false
+                    AppScope.io.launch { repo.setLocalModelEnabled(true) }
+                }) { Text(S.lmWarnEnableAnyway) }
+            },
+            dismissButton = { TextButton(onClick = { lmConfirmUseLocalOn = false }) { Text(S.actionCancel) } }
         )
     }
 
@@ -1178,10 +1380,18 @@ fun SettingsScreen(active: Boolean = true) {
     }
 
     // Turn a chosen subset + format into bytes and kick off the file picker. Shared by the notes and
-    // tasks export screens below so the format handling lives in exactly one place.
-    fun launchExport(fileStem: String, bytes: ByteArray, format: com.lucent.app.data.ExportFormat) {
+    // tasks export screens below so the format handling lives in exactly one place. When [asZip] is
+    // set the bytes are a .zip bundle (document + attachment files) and the suggested name gets a
+    // .zip extension instead of the format's own; the generic launcher writes whatever bytes it's
+    // given, so the extension is all that needs to change.
+    fun launchExport(
+        fileStem: String,
+        bytes: ByteArray,
+        format: com.lucent.app.data.ExportFormat,
+        asZip: Boolean = false
+    ) {
         pendingExportBytes = bytes
-        pendingExportName = "$fileStem.${format.extension}"
+        pendingExportName = "$fileStem.${if (asZip) "zip" else format.extension}"
         exportKind = null
         selectiveExportLauncher.launch(pendingExportName)
     }
@@ -1206,8 +1416,17 @@ fun SettingsScreen(active: Boolean = true) {
                 subtitle = { formatTimestamp(it.updatedAt) },
                 timestamp = { it.updatedAt },
                 searchText = { it.title + "\n" + it.body },
-                onExport = { subset, format ->
-                    launchExport("lucent-notes", com.lucent.app.data.DocumentExport.exportNotes(subset, format), format)
+                attachmentsOf = { com.lucent.app.data.Attachments.parse(it.attachments) },
+                onExport = { subset, format, atts ->
+                    val doc = com.lucent.app.data.DocumentExport.exportNotes(subset, format)
+                    if (atts.isEmpty()) {
+                        launchExport("lucent-notes", doc, format)
+                    } else {
+                        val bundle = com.lucent.app.data.DocumentExport.zipWithAttachments(
+                            context, "lucent-notes.${format.extension}", doc, atts
+                        )
+                        launchExport("lucent-notes", bundle, format, asZip = true)
+                    }
                 },
                 onBack = { exportKind = null }
             )
@@ -1219,8 +1438,17 @@ fun SettingsScreen(active: Boolean = true) {
                 subtitle = { formatTimestamp(it.createdAt) + if (it.isDone) S.doneSuffix else "" },
                 timestamp = { it.createdAt },
                 searchText = { it.title + "\n" + it.notes },
-                onExport = { subset, format ->
-                    launchExport("lucent-tasks", com.lucent.app.data.DocumentExport.exportTasks(subset, format), format)
+                attachmentsOf = { com.lucent.app.data.Attachments.parse(it.attachments) },
+                onExport = { subset, format, atts ->
+                    val doc = com.lucent.app.data.DocumentExport.exportTasks(subset, format)
+                    if (atts.isEmpty()) {
+                        launchExport("lucent-tasks", doc, format)
+                    } else {
+                        val bundle = com.lucent.app.data.DocumentExport.zipWithAttachments(
+                            context, "lucent-tasks.${format.extension}", doc, atts
+                        )
+                        launchExport("lucent-tasks", bundle, format, asZip = true)
+                    }
                 },
                 onBack = { exportKind = null }
             )
@@ -1311,6 +1539,11 @@ fun SettingsScreen(active: Boolean = true) {
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
+                // Font lives here now (moved out of Appearance): a typeface is a writing/language
+                // choice as much as a visual one, so it sits with the language picker rather than
+                // alongside theme and background.
+                NavCard(S.settingsFontTitle, S.settingsFontSub) { route = SettingsRoute.Font }
             }
 
             SettingsRoute.Assistant -> {
@@ -1330,9 +1563,12 @@ fun SettingsScreen(active: Boolean = true) {
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Memory and Web are one card again (task 10): a single "Memory & web" page holds the
-                // memory tier and the web-search toggle together.
-                NavCard(S.settingsMemoryWebTitle, S.settingsMemoryWebSub) { route = SettingsRoute.Memory }
+                // Memory and Networking are now two separate cards: one page for how much the
+                // assistant remembers (the memory tier), and a distinct page for going online (the
+                // web-search toggle). They used to share a single "Memory & web" card.
+                NavCard(S.settingsMemoryTitle, S.settingsMemorySub) { route = SettingsRoute.Memory }
+                Spacer(modifier = Modifier.height(12.dp))
+                NavCard(S.settingsNetworkTitle, S.settingsNetworkSub) { route = SettingsRoute.Network }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -1352,21 +1588,54 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                 } else {
                     Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        // Experimental badge (task): set expectations before anything else on the page.
+                        Text(S.lmExperimentalNote, color = onGradient, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(S.lmModelsTitle, color = onGradient, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                            Text("${lmModels.size}/${LocalModelStore.MAX_MODELS}", color = onGradientMuted, fontSize = 13.sp)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(S.lmPageIntro, color = onGradientMuted, fontSize = 13.sp)
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // What's imported right now — the name the user picked and its size — or an
-                        // honest "nothing yet". The size matters here: it is the RAM this feature
-                        // will want, and showing it is the cheapest possible expectation-setting.
-                        Text(
-                            if (lmHasModel) S.lmCurrentModel(lmModelName ?: "model.gguf", lmModelSize)
-                            else S.lmNoModelYet,
-                            color = onGradient,
-                            fontSize = 14.sp
-                        )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(S.lmSizeHint, color = onGradientMuted, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(12.dp))
+
+                        if (lmModels.isEmpty()) {
+                            Text(S.lmNoModelYet, color = onGradient, fontSize = 14.sp)
+                        } else {
+                            // One row per imported model: a radio picks the ACTIVE model (only it is
+                            // ever loaded), its name and size are shown, and each has rename + delete.
+                            // Switching the radio releases the previously loaded model right away.
+                            lmModels.forEach { slot ->
+                                val active = slot.id == lmActiveId
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                    RadioButton(selected = active, onClick = { selectLocalModel(slot.id) })
+                                    Column(
+                                        modifier = Modifier.weight(1f).clickable { selectLocalModel(slot.id) }.padding(vertical = 4.dp)
+                                    ) {
+                                        Text(slot.name.ifBlank { "model.gguf" }, color = onGradient, fontSize = 14.sp)
+                                        Text(
+                                            AttachmentLimits.formatBytes(LocalModelStore.modelSizeBytes(context, slot.id)) +
+                                                (if (active) " · " + S.lmActiveTag else ""),
+                                            color = onGradientMuted,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    IconButton(onClick = {
+                                        lmRenameText = slot.name
+                                        lmRenameTarget = slot
+                                    }) {
+                                        Icon(Icons.Default.Edit, contentDescription = S.lmRenameA11y, tint = onGradientMuted)
+                                    }
+                                    IconButton(onClick = { lmSlotPendingDelete = slot }) {
+                                        Icon(Icons.Default.Delete, contentDescription = S.lmDeleteA11y, tint = onGradientMuted)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         if (lmImporting) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1374,16 +1643,13 @@ fun SettingsScreen(active: Boolean = true) {
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text(S.lmImporting, color = onGradientMuted, fontSize = 13.sp)
                             }
-                        } else {
-                            Row {
-                                Button(onClick = { lmImportLauncher.launch(arrayOf("*/*")) }) {
-                                    Text(if (lmHasModel) S.lmReplaceButton else S.lmImportButton)
-                                }
-                                if (lmHasModel) {
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    TextButton(onClick = { lmConfirmDelete = true }) { Text(S.lmDeleteButton) }
-                                }
+                        } else if (lmCanImportMore) {
+                            TextButton(onClick = { lmImportLauncher.launch(arrayOf("*/*")) }) {
+                                Icon(Icons.Default.Add, contentDescription = null, tint = onGradient)
+                                Text(" " + S.lmImportButton, color = onGradient)
                             }
+                        } else {
+                            Text(S.lmSlotsFullHint(LocalModelStore.MAX_MODELS), color = onGradientMuted, fontSize = 12.sp)
                         }
                         if (lmError.isNotBlank()) {
                             Spacer(modifier = Modifier.height(8.dp))
@@ -1406,11 +1672,16 @@ fun SettingsScreen(active: Boolean = true) {
                             Spacer(modifier = Modifier.width(12.dp))
                             // Can't be switched ON without a model (that state would only produce an
                             // error on the next send); can always be switched OFF, including the
-                            // legacy case of a stored "on" with the model since removed.
+                            // legacy case of a stored "on" with the model since removed. Turning it
+                            // ON goes through a warning first (freezes the API, pulls the model into
+                            // RAM); turning it OFF is immediate.
                             Switch(
                                 checked = localModelEnabled,
                                 enabled = lmHasModel || localModelEnabled,
-                                onCheckedChange = { on -> AppScope.io.launch { repo.setLocalModelEnabled(on) } }
+                                onCheckedChange = { on ->
+                                    if (on) lmConfirmUseLocalOn = true
+                                    else AppScope.io.launch { repo.setLocalModelEnabled(false) }
+                                }
                             )
                         }
                     }
@@ -1443,15 +1714,24 @@ fun SettingsScreen(active: Boolean = true) {
                     // Opt-in: run the model on the GPU instead of the CPU. Off (= CPU) by default
                     // because CPU never crashes; GPU can be faster but is unstable on some Android
                     // drivers, so switching TO it asks first, switching back to CPU is immediate.
+                    // It also can't be switched ON until a model is imported (task): choosing a
+                    // backend for a model that doesn't exist yet is meaningless and the setting is
+                    // only ever read when a model is actually loaded — so the toggle is disabled with
+                    // no model, exactly like "Use local model" above. Can always be switched OFF.
                     Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(S.lmGpuToggle, color = onGradient, fontSize = 16.sp)
                                 Text(S.lmGpuToggleDesc, color = onGradientMuted, fontSize = 13.sp)
+                                if (!lmHasModel) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(S.lmGpuNeedsModel, color = onGradientMuted, fontSize = 12.sp)
+                                }
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Switch(
                                 checked = localGpuEnabled,
+                                enabled = lmHasModel || localGpuEnabled,
                                 onCheckedChange = { on ->
                                     if (on) lmConfirmGpuOn = true
                                     else AppScope.io.launch { repo.setLocalGpuEnabled(false) }
@@ -1509,10 +1789,10 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Memory -> {
-                BackHeader(S.settingsMemoryWebTitle) { route = SettingsRoute.Assistant }
+                BackHeader(S.settingsMemoryTitle) { route = SettingsRoute.Assistant }
 
-                // Memory tier (issue 9). Each option explains both what the assistant will remember
-                // and the rough cost trade-off, since more context means more tokens per reply.
+                // Memory tier. Each option explains both what the assistant will remember and the
+                // rough cost trade-off, since more context means more tokens per reply.
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Text(S.memoryCostTitle, color = onGradient, fontSize = 16.sp)
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1550,10 +1830,12 @@ fun SettingsScreen(active: Boolean = true) {
                         onClick = { AppScope.io.launch { repo.setMemoryTier(MemoryTier.HIGH.key) } }
                     )
                 }
+            }
 
-                Spacer(modifier = Modifier.height(12.dp))
+            SettingsRoute.Network -> {
+                BackHeader(S.settingsNetworkTitle) { route = SettingsRoute.Assistant }
 
-                // Web search toggle (issue 16), now sharing this combined "Memory & web" page (task 10).
+                // Web search toggle: lets the cloud assistant look things up online.
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.weight(1f)) {
@@ -1576,6 +1858,23 @@ fun SettingsScreen(active: Boolean = true) {
             SettingsRoute.Api -> {
                 BackHeader(S.settingsApiTitle) { route = SettingsRoute.Assistant }
 
+                // When local model mode is on, the cloud API is FROZEN — the assistant answers
+                // on-device and never calls the API. Say so plainly at the top of the page (with a
+                // one-tap way back to the Local Model page to turn it off), and disable the actions
+                // that would call or commit an API below, so the freeze is tangible, not just a claim.
+                if (localModelEnabled) {
+                    Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                        Text(S.apiFrozenTitle, color = onGradient, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(S.apiFrozenBody, color = onGradientMuted, fontSize = 13.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = { route = SettingsRoute.LocalModel }) {
+                            Text(S.apiFrozenManage, color = onGradient)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
                 // ---- API Selection: pick which saved profile is active ----
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1596,10 +1895,11 @@ fun SettingsScreen(active: Boolean = true) {
                                     fontSize = 12.sp
                                 )
                             }
-                            if (profiles.size > 1) {
-                                IconButton(onClick = { profilePendingDelete = idx }) {
-                                    Icon(Icons.Default.Delete, contentDescription = S.apiDeleteA11y, tint = onGradientMuted)
-                                }
+                            // The delete icon is always shown — even for the only profile (task
+                            // requirement). Deleting always asks for confirmation first (the dialog
+                            // below), and deleting the last one clears it back to a blank slot.
+                            IconButton(onClick = { profilePendingDelete = idx }) {
+                                Icon(Icons.Default.Delete, contentDescription = S.apiDeleteA11y, tint = onGradientMuted)
                             }
                         }
                     }
@@ -1682,7 +1982,9 @@ fun SettingsScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Button(onClick = {
+                    Button(
+                        enabled = !localModelEnabled,
+                        onClick = {
                         loading = true
                         errorText = ""
                         scope.launch {
@@ -1735,19 +2037,18 @@ fun SettingsScreen(active: Boolean = true) {
 
                     Spacer(modifier = Modifier.height(16.dp))
                     // Saving writes the edits into the selected profile and activates it, so the
-                    // assistant uses it right away.
-                    Button(onClick = { saveActiveProfile(selectedProfileIdx) }) { Text(S.saveApi) }
+                    // assistant uses it right away. Disabled while local mode has the API frozen.
+                    Button(enabled = !localModelEnabled, onClick = { saveActiveProfile(selectedProfileIdx) }) { Text(S.saveApi) }
                 }
             }
 
             SettingsRoute.Appearance -> {
                 BackHeader(S.settingsAppearanceTitle) { route = SettingsRoute.Root }
-                // Three hierarchical entries, mirroring the Assistant screen's structure.
+                // Two hierarchical entries, mirroring the Assistant screen's structure. (Font moved
+                // to the Language screen — it's as much a writing choice as a visual one.)
                 NavCard(S.settingsThemeTitle, S.settingsThemeSub) { route = SettingsRoute.Theme }
                 Spacer(modifier = Modifier.height(12.dp))
                 NavCard(S.settingsBackgroundTitle, S.settingsBackgroundSub) { route = SettingsRoute.Background }
-                Spacer(modifier = Modifier.height(12.dp))
-                NavCard(S.settingsFontTitle, S.settingsFontSub) { route = SettingsRoute.Font }
             }
 
             SettingsRoute.Theme -> {
@@ -1783,6 +2084,23 @@ fun SettingsScreen(active: Boolean = true) {
 
             SettingsRoute.Background -> {
                 BackHeader(S.settingsBackgroundTitle) { route = SettingsRoute.Appearance }
+                // At the very top: the master switch for the drifting effect. Off = a still, flat
+                // theme colour, and the palette choice below only takes visible effect once it's on.
+                Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(S.backgroundAnimationTitle, color = onGradient)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(S.backgroundAnimationDesc, color = onGradientMuted, fontSize = 13.sp)
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = backgroundAnimationEnabled,
+                            onCheckedChange = { checked -> scope.launch { repo.setBackgroundAnimationEnabled(checked) } }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     // Auto-cycle: rotates through every palette over time. Its swatch previews the
                     // spread of colours it moves through.
@@ -1818,7 +2136,7 @@ fun SettingsScreen(active: Boolean = true) {
             }
 
             SettingsRoute.Font -> {
-                BackHeader(S.settingsFontTitle) { route = SettingsRoute.Appearance }
+                BackHeader(S.settingsFontTitle) { route = SettingsRoute.Language }
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                     // One row per font, its label drawn in its own font so the list doubles as a live
                     // preview; selecting saves immediately. The list is grouped by writing system with
@@ -1945,9 +2263,10 @@ fun SettingsScreen(active: Boolean = true) {
                                     lockSetupError = ""
                                     showAppLockSetup = true
                                 } else {
-                                    scope.launch { repo.setAppLock(false, "") }
-                                    AppLockController.enabled = false
-                                    AppLockController.unlock()
+                                    // Don't disable straight away: a dialog confirms the password
+                                    // first and explains the risk of removing the lock (task).
+                                    disablePw = ""; disableError = ""
+                                    showAppLockDisable = true
                                 }
                             }
                         )
@@ -1985,6 +2304,10 @@ fun SettingsScreen(active: Boolean = true) {
                                 } else {
                                     scope.launch { repo.setSystemIntegrationEnabled(false) }
                                     ShareIntegration.setEnabled(context, false)
+                                    // Disabling now gets the same bottom notification enabling does
+                                    // (task): an acknowledgement that the change took effect. No dialog
+                                    // — turning a feature *off* needs confirming, not warning about.
+                                    LucentToast.show(context, S.systemIntegrationOffToast)
                                 }
                             }
                         )

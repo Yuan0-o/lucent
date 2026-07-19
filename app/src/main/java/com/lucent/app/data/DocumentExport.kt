@@ -412,4 +412,55 @@ object DocumentExport {
         }
         return sb.toString()
     }
+
+    // ============================ Export bundling with attachments ============================
+    //
+    // When the user ticks attachments to embed, the chosen document is written into a .zip next to an
+    // `attachments/` folder holding the actual files. The document itself is unchanged — it still only
+    // *names* its attachments — so a reader gets both the readable export and the files it refers to.
+
+    /**
+     * Build a .zip holding [documentBytes] (written as [documentName], e.g. "lucent-notes.md") plus
+     * the bytes of every attachment in [attachments], each under `attachments/` with a de-duplicated
+     * file name. Attachments that can't be read (missing on disk, oversized) are skipped rather than
+     * failing the whole export — reading each one fully before writing its entry means a skip never
+     * leaves a half-written entry that would corrupt the archive.
+     */
+    fun zipWithAttachments(
+        context: android.content.Context,
+        documentName: String,
+        documentBytes: ByteArray,
+        attachments: List<Attachment>
+    ): ByteArray {
+        val baos = ByteArrayOutputStream()
+        ZipOutputStream(baos).use { zos ->
+            zos.putNextEntry(ZipEntry(documentName))
+            zos.write(documentBytes)
+            zos.closeEntry()
+
+            val usedNames = hashSetOf(documentName)
+            for (att in attachments) {
+                val bytes = Attachments.readBytes(context, att, maxBytes = 256L * 1024 * 1024) ?: continue
+                val entryName = "attachments/" + uniqueEntryName(att.name.ifBlank { "file" }, usedNames)
+                zos.putNextEntry(ZipEntry(entryName))
+                zos.write(bytes)
+                zos.closeEntry()
+            }
+        }
+        return baos.toByteArray()
+    }
+
+    /** Make [name] unique within [used] by inserting " (2)", " (3)", … before the extension. */
+    private fun uniqueEntryName(name: String, used: MutableSet<String>): String {
+        if (used.add(name)) return name
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var n = 2
+        while (true) {
+            val candidate = "$stem ($n)$ext"
+            if (used.add(candidate)) return candidate
+            n++
+        }
+    }
 }

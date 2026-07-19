@@ -277,6 +277,9 @@ fun AssistantScreen(active: Boolean = true) {
     val streamingText = AssistantController.streamingText
     val sending = AssistantController.sending
     val thinking = AssistantController.thinking
+    // While the on-device model is being loaded into memory, the thinking bubble says so explicitly,
+    // so the (expected, multi-second) first-load wait reads as loading rather than a stall.
+    val loadingModel = AssistantController.loadingModel
     val pendingConfirmation = AssistantController.pendingConfirmation
     val networkError = AssistantController.networkErrorMessage
     val shownError = if (AssistantController.errorText.isNotBlank()) AssistantController.errorText else localError
@@ -1050,7 +1053,12 @@ fun AssistantScreen(active: Boolean = true) {
                     item(key = "thinking") {
                         Box(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.align(Alignment.CenterStart).frostedGlass().padding(12.dp)) {
-                                ThinkingBubble(name = assistantName, tint = onGradient, mutedTint = onGradientMuted)
+                                ThinkingBubble(
+                                    name = assistantName,
+                                    tint = onGradient,
+                                    mutedTint = onGradientMuted,
+                                    loadingModel = loadingModel
+                                )
                             }
                         }
                     }
@@ -1123,11 +1131,13 @@ fun AssistantScreen(active: Boolean = true) {
                         val text = input.trim()
                         val attachment = pendingAttachment
                         if (text.isBlank() && attachment == null) return@IconButton
-                        // Local mode replaces the whole cloud configuration (task: zero
-                        // setup): with it on and a model imported, no URL/key/model is needed —
-                        // so this guard only applies to the cloud path.
-                        val useLocal = localModelEnabled &&
-                            com.lucent.app.local.LocalModelStore.hasModel(context)
+                        // Local mode is AUTHORITATIVE. Once "use local model" is on, the assistant
+                        // replies on-device and the cloud API is frozen — the send path must never
+                        // silently fall back to it (that was the "it still calls the API" bug). If
+                        // local is on but no model is loaded, the controller surfaces a clear
+                        // "no model" error rather than reaching for the API. The cloud URL/model
+                        // guard below therefore only applies when local mode is OFF.
+                        val useLocal = localModelEnabled
                         if (!useLocal && (savedUrl.isBlank() || savedModel.isBlank())) {
                             localError = com.lucent.app.i18n.S.setupApiFirst
                             return@IconButton
@@ -1210,10 +1220,15 @@ private fun JumpToLatestButton(
  * self-contained; it animates only while it's on screen.
  */
 @Composable
-private fun ThinkingBubble(name: String, tint: Color, mutedTint: Color) {
+private fun ThinkingBubble(name: String, tint: Color, mutedTint: Color, loadingModel: Boolean = false) {
     val transition = rememberInfiniteTransition(label = "thinking")
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(com.lucent.app.i18n.S.thinkingIndicator(name), color = mutedTint, fontSize = 13.sp)
+        Text(
+            if (loadingModel) com.lucent.app.i18n.S.lmLoadingIndicator
+            else com.lucent.app.i18n.S.thinkingIndicator(name),
+            color = mutedTint,
+            fontSize = 13.sp
+        )
         Spacer(modifier = Modifier.width(4.dp))
         for (i in 0 until 3) {
             val dotAlpha by transition.animateFloat(

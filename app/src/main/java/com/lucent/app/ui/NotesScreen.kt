@@ -37,7 +37,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
@@ -75,6 +74,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -435,8 +437,23 @@ fun NotesScreen(active: Boolean = true) {
             showTrash = false
             showSearch = false
             showOverflowMenu = false
+            // Collapse the header's action cluster too (task): leaving the tab and coming back should
+            // find it tucked away again, not still expanded.
+            actionsExpanded = false
             exitSelection()
         }
+    }
+
+    // Collapse the action cluster when the app leaves the foreground (screen off, home, another
+    // app), so reopening finds it tucked away rather than as it was left (task). ON_STOP fires when
+    // the activity is no longer visible, which covers all of those without touching the tab state.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) actionsExpanded = false
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Registers with the app-lifetime guard so switching bottom-nav tabs, or the system back
@@ -1218,11 +1235,9 @@ fun NotesScreen(active: Boolean = true) {
                                     Icon(Icons.Default.MoreVert, contentDescription = com.lucent.app.i18n.S.a11yMoreOptions, tint = onGradientMuted)
                                 }
                                 DropdownMenu(expanded = showOverflowMenu, onDismissRequest = { showOverflowMenu = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text(com.lucent.app.i18n.S.selectNotes) },
-                                        leadingIcon = { Icon(Icons.Default.Checklist, contentDescription = null) },
-                                        onClick = { showOverflowMenu = false; selectionMode = true }
-                                    )
+                                    // "Select notes" is no longer here — selection is entered by
+                                    // long-pressing a note (see onLongPress below). The overflow menu
+                                    // now holds only the three navigation destinations.
                                     DropdownMenuItem(
                                         text = { Text(com.lucent.app.i18n.S.searchEverything) },
                                         leadingIcon = { Icon(Icons.Default.TravelExplore, contentDescription = null) },

@@ -1,7 +1,9 @@
 package com.lucent.app.ui
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.os.Build
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -40,9 +42,14 @@ object Haptics {
     private const val TYPING_AMPLITUDE = 1        // the floor; the gentlest a motor will do
     private const val TYPING_MIN_GAP_MS = 16L
 
-    // The single strong pulse that marks "the reply is complete".
-    private const val FINISH_MS = 42L
-    private const val FINISH_AMPLITUDE = 235      // out of 255; deliberately assertive
+    // The strong pulse that marks "the reply is complete". This is a short two-step waveform — a
+    // medium tap, a brief gap, then a firm pulse — rather than a single 42ms one-shot. On some OEM
+    // motors (notably Huawei/EMUI) a single short one-shot either isn't rendered at all or is
+    // silently dropped, whereas a slightly longer waveform carrying a notification usage hint (see
+    // [vibrateStrong]) fires reliably. On devices that were already fine it simply reads as one
+    // firm "done" buzz.
+    private val FINISH_TIMINGS = longArrayOf(0L, 40L, 40L, 100L)   // wait · on · gap · on
+    private val FINISH_AMPLITUDES = intArrayOf(0, 180, 0, 255)     // matching amplitudes (0 = gap)
 
     @Volatile private var lastTypingTickAt = 0L
 
@@ -86,8 +93,52 @@ object Haptics {
         oneShot(context, TYPING_TICK_MS, TYPING_AMPLITUDE)
     }
 
+    /**
+     * Play [effect] as a *notification-usage* vibration. Tagging the usage is what stops a number of
+     * OEM skins (Huawei/EMUI among them) from quietly suppressing an app's vibrations: an untagged
+     * one is treated as a low-priority touch tick and can be dropped, while a notification-usage one
+     * is honoured. Uses [VibrationAttributes] on API 33+ and the older [AudioAttributes] overload
+     * (available since API 26) below that.
+     */
+    private fun vibrateStrong(vib: Vibrator, effect: VibrationEffect) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val attrs = VibrationAttributes.Builder()
+                .setUsage(VibrationAttributes.USAGE_NOTIFICATION)
+                .build()
+            vib.vibrate(effect, attrs)
+        } else {
+            @Suppress("DEPRECATION")
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            @Suppress("DEPRECATION")
+            vib.vibrate(effect, attrs)
+        }
+    }
+
     /** The single, firm "reply finished" buzz. Any-thread safe. */
-    fun finishBuzz(context: Context) = oneShot(context, FINISH_MS, FINISH_AMPLITUDE)
+    fun finishBuzz(context: Context) {
+        val vib = vibrator(context.applicationContext) ?: return
+        if (!vib.hasVibrator()) return
+        try {
+            // Clear any still-running typewriter tick first: some OEM vibrators drop a new effect
+            // that arrives while another is playing instead of replacing it, which is one way the
+            // finish buzz can go missing on those devices.
+            vib.cancel()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // createWaveform with amplitudes degrades to on/off on motors without amplitude
+                // control (non-zero = on), so this one call is correct on every API-26+ device.
+                val effect = VibrationEffect.createWaveform(FINISH_TIMINGS, FINISH_AMPLITUDES, -1)
+                vibrateStrong(vib, effect)
+            } else {
+                @Suppress("DEPRECATION")
+                vib.vibrate(FINISH_TIMINGS, -1)
+            }
+        } catch (_: Throwable) {
+            // Feedback is non-essential; never let a misbehaving OEM vibrator crash a reply.
+        }
+    }
 }
 
 /**
