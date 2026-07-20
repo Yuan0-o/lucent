@@ -113,6 +113,61 @@ object AppTools {
         }
     }
 
+    /**
+     * The one argument of a tool call that is worth letting the user correct before it runs, and
+     * the label to put on the field (task 3).
+     *
+     * ### Why only one field
+     *
+     * The confirmation modal exists so an action can be *stopped*, and the overwhelmingly common
+     * reason to stop one is that the model got the wording slightly wrong — it heard "remind me to
+     * eat tomorrow" and proposed a task called "eat tomorrow" when what was meant was "eat
+     * breakfast tomorrow". Declining, retyping the request and hoping for better is a poor answer to
+     * a one-word problem.
+     *
+     * But a full argument editor would be a worse answer still: it turns a yes/no into a form, in a
+     * modal, mid-conversation, and it invites the user to hand-edit fields (dates, priorities, tool
+     * names) whose valid values they have no way to see. So exactly one field is editable — the
+     * human-readable *subject* of the action, which is the part a person can judge at a glance and
+     * the only part they usually want to change. Everything else stays as the model proposed it, and
+     * anything more complicated is still better said in words to the assistant.
+     *
+     * Returns null for calls with no such field (deletes, pins, completions), where the decision
+     * really is only yes or no.
+     */
+    data class EditableArgument(val key: String, val label: String, val value: String)
+
+    fun editableArgument(name: String, argumentsJson: String): EditableArgument? {
+        val a = try { JSONObject(argumentsJson) } catch (e: Exception) { return null }
+        fun of(key: String, label: String): EditableArgument? =
+            a.optString(key, "").takeIf { it.isNotBlank() }?.let { EditableArgument(key, label, it) }
+        return when (name) {
+            // Creating something: the title is the thing the user is really approving.
+            "create_note" -> of("title", com.lucent.app.i18n.S.confirmEditTitleLabel)
+            "create_task" -> of("title", com.lucent.app.i18n.S.confirmEditTitleLabel)
+            // Renaming: the NEW title is the part under review, not the old one used to find it.
+            "update_note" -> of("new_title", com.lucent.app.i18n.S.confirmEditNewTitleLabel)
+            "update_task" -> of("new_title", com.lucent.app.i18n.S.confirmEditNewTitleLabel)
+            // Subtask text is short, free-form, and just as easy for a model to slightly mishear.
+            "add_subtask" -> of("item", com.lucent.app.i18n.S.confirmEditItemLabel)
+            else -> null
+        }
+    }
+
+    /**
+     * Return [argumentsJson] with [key] set to [value]. Used when the user edits the field offered
+     * by [editableArgument] before approving, so the tool runs with what they actually want rather
+     * than with what the model proposed.
+     *
+     * Falls back to the original text if the arguments won't parse — a call we cannot read is a call
+     * we must not silently rewrite.
+     */
+    fun withArgument(argumentsJson: String, key: String, value: String): String = try {
+        JSONObject(argumentsJson).put(key, value).toString()
+    } catch (e: Exception) {
+        argumentsJson
+    }
+
     private fun newTitleSuffix(a: JSONObject): String {
         val nt = a.optString("new_title", "")
         return if (nt.isNotBlank()) com.lucent.app.i18n.S.ccRenameSuffix(nt) else ""
