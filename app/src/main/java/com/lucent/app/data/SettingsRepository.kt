@@ -106,6 +106,9 @@ private object SettingsKeys {
     // stored through LocalSecrets anyway to match every other secret at rest here.
     val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
     val APP_LOCK_CREDENTIALS_ENC = stringPreferencesKey("app_lock_credentials_enc")
+    // Opt-in biometric unlock for the App Lock. Off by default; only meaningful while the lock is on
+    // and the device actually has enrolled biometrics.
+    val APP_LOCK_BIOMETRIC_ENABLED = booleanPreferencesKey("app_lock_biometric_enabled")
 
     // ---- System share / intent integration (task 6) — OFF by default ----
     // Gates whether Lucent appears in the OS share sheet and accepts shared text/attachments. The
@@ -247,9 +250,9 @@ class SettingsRepository(private val context: Context) {
         val systemIntegrationEnabled: Boolean,
         // The UI language is first-frame state exactly like the theme: composing the first frame
         // in one language and snapping to another a beat later would be the same "blink" the display
-        // prefs exist to prevent, so it rides in the same single read. Defaults to English — the app
-        // ships English-first and the user picks another language (or "follow system") in Settings.
-        val appLanguage: String = "en",
+        // prefs exist to prevent, so it rides in the same single read. Defaults to "system" — the app
+        // follows the device language out of the box, and the user can pin a specific language in Settings.
+        val appLanguage: String = "system",
         // Whether the drifting background animates. First-frame state too: the SPLASH draws the
         // same background, so if this were read asynchronously the splash of a user who turned the
         // effect off would open with drifting blobs and only go still a beat later — exactly the
@@ -268,18 +271,18 @@ class SettingsRepository(private val context: Context) {
             appLockEnabled = prefs[SettingsKeys.APP_LOCK_ENABLED] ?: false,
             startupLoggingEnabled = prefs[SettingsKeys.STARTUP_LOGGING_ENABLED] ?: false,
             systemIntegrationEnabled = prefs[SettingsKeys.SYSTEM_INTEGRATION_ENABLED] ?: false,
-            appLanguage = prefs[SettingsKeys.APP_LANGUAGE] ?: "en",
+            appLanguage = prefs[SettingsKeys.APP_LANGUAGE] ?: "system",
             backgroundAnimationEnabled = prefs[SettingsKeys.BACKGROUND_ANIMATION_ENABLED] ?: true
         )
     }
 
     // ---- UI language (localization task) ----
-    /** The chosen UI language key ("system", "en", "zh", "ja", "ko"); defaults to "en". See i18n/I18n.kt. */
-    val appLanguage: Flow<String> = context.settingsDataStore.data.map { it[SettingsKeys.APP_LANGUAGE] ?: "en" }
+    /** The chosen UI language key ("system", "en", "zh", "ja", "ko"); defaults to "system". See i18n/I18n.kt. */
+    val appLanguage: Flow<String> = context.settingsDataStore.data.map { it[SettingsKeys.APP_LANGUAGE] ?: "system" }
     suspend fun setAppLanguage(value: String) { context.settingsDataStore.edit { it[SettingsKeys.APP_LANGUAGE] = value } }
     /** One-shot read for contexts that run without the Activity (e.g. the reminder receiver). */
     suspend fun appLanguageOnce(): String =
-        context.settingsDataStore.data.first()[SettingsKeys.APP_LANGUAGE] ?: "en"
+        context.settingsDataStore.data.first()[SettingsKeys.APP_LANGUAGE] ?: "system"
 
     // ---- Local model (task: on-device GGUF assistant) ----
     /** Whether the assistant answers with the imported on-device model. Off by default. */
@@ -462,6 +465,10 @@ class SettingsRepository(private val context: Context) {
                 prefs[SettingsKeys.APP_LOCK_CREDENTIALS_ENC] = LocalSecrets.encrypt(credentialsJson)
             } else if (!enabled) {
                 prefs.remove(SettingsKeys.APP_LOCK_CREDENTIALS_ENC)
+                // Biometric unlock only makes sense while the lock is on, so tearing the lock down
+                // also clears the biometric opt-in. Re-enabling the lock then starts from "off",
+                // making the user choose it again rather than silently inheriting an old choice.
+                prefs.remove(SettingsKeys.APP_LOCK_BIOMETRIC_ENABLED)
             }
         }
     }
@@ -469,6 +476,14 @@ class SettingsRepository(private val context: Context) {
     /** Replace just the credentials (used by password recovery/change) without touching the flag. */
     suspend fun setAppLockCredentials(credentialsJson: String) {
         context.settingsDataStore.edit { it[SettingsKeys.APP_LOCK_CREDENTIALS_ENC] = LocalSecrets.encrypt(credentialsJson) }
+    }
+
+    // ---- Biometric unlock for the App Lock ----
+    /** Whether the user has opted into biometric unlock. Off by default; cleared when the lock is removed. */
+    val appLockBiometricEnabled: Flow<Boolean> =
+        context.settingsDataStore.data.map { it[SettingsKeys.APP_LOCK_BIOMETRIC_ENABLED] ?: false }
+    suspend fun setAppLockBiometricEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[SettingsKeys.APP_LOCK_BIOMETRIC_ENABLED] = enabled }
     }
 
     // ---- System share / intent integration (task 6) ----
