@@ -373,7 +373,7 @@ data class SearchQuery(
         // =============================================================================
         //
         // The chips above the search box have been translated for a while, so a Chinese user taps
-        // one and sees 已完成 — and then, typing the same search by hand the next day, discovers
+        // one and sees the Chinese word for "done" — then, typing the same search by hand the next day, finds
         // that only `is:done` actually filters anything. The filter *language* was English even
         // where the interface was not, which makes the whole feature look like it is for somebody
         // else.
@@ -387,15 +387,15 @@ data class SearchQuery(
         //
         //  - **All four languages are accepted at once, whatever the UI is set to.** Language is a
         //    property of the person, not of the app: someone running Lucent in English still thinks
-        //    "完了" when they mean done, and a query typed on a phone set to Korean should still
+        //    in the Japanese word for "done", and a query typed on a phone set to Korean should still
         //    work after switching the interface to Japanese. Keying this off L.current would have
         //    made saved queries silently stop matching when the UI language changed.
         //  - **The standalone words are exactly the chip labels.** What the chip shows you is what
         //    you can type, so the row of chips doubles as the documentation for this feature instead
         //    of being a separate vocabulary to learn.
         //
-        // The cost, stated plainly: a note containing the literal word "已完成" can no longer be
-        // found by typing that word bare — it now reads as a filter. Quoting it ("已完成") searches
+        // The cost, stated plainly: a note containing that literal Chinese word can no longer be
+        // found by typing it bare — it now reads as a filter. Quoting it searches
         // for the text, which is the same escape hatch English users already have for `tag:`, and
         // the help sheet says so (helpLocalizedFilters).
 
@@ -438,7 +438,7 @@ data class SearchQuery(
         /**
          * Localized names for the part AFTER the colon, per canonical field. Kept separate from
          * [LOCALIZED_TOKENS] because the same word means different things in different fields:
-         * `due:今天` is a window, while a bare 今天 is the `due:today` filter.
+         * `due:` followed by the word for "today" is a window, while that word alone is the `due:today` filter.
          */
         private val LOCALIZED_VALUES: Map<String, Map<String, String>> = mapOf(
             "is" to buildMap<String, String> {
@@ -476,7 +476,7 @@ data class SearchQuery(
          * Runs before any parsing decision is made, so every rule below it — quoting, `#tag`,
          * unknown-token-is-literal-text — behaves identically no matter which language produced the
          * token. Also normalizes the full-width punctuation a CJK keyboard produces by default:
-         * typing 标签：工作 on a Chinese IME gives U+FF1A, not an ASCII colon, and a filter that
+         * typing a tag filter like "tag:work" on a Chinese IME gives U+FF1A, not an ASCII colon, and a filter that
          * silently fails because of an invisible codepoint is worse than one that doesn't exist.
          */
         private fun canonicalizeToken(raw: String): String {
