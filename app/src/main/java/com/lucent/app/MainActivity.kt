@@ -9,6 +9,7 @@ import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -84,6 +85,7 @@ import com.lucent.app.ui.AssistantController
 import com.lucent.app.ui.AssistantScreen
 import com.lucent.app.ui.FluidGlassBackground
 import com.lucent.app.ui.LocalHazeState
+import com.lucent.app.ui.LocalBottomBarInset
 import com.lucent.app.ui.LocalOnGradient
 import com.lucent.app.ui.LocalOnGradientMuted
 import com.lucent.app.ui.LockScreen
@@ -107,9 +109,11 @@ import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 import dev.chrisbanes.haze.materials.HazeMaterials
 import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 enum class Screen {
     // Bottom-bar order is this declaration order (the bar iterates Screen.entries). Tasks is
@@ -137,7 +141,29 @@ enum class Screen {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Transparent system bars, explicitly (tasks 5/10).
+        //
+        // Bare enableEdgeToEdge() defaults to SystemBarStyle.auto(), which paints a translucent
+        // SCRIM behind the status and navigation bars on the devices that need one. That scrim is
+        // the "rectangular block" at the bottom of the screen: a full-width band, a shade lighter
+        // than the wallpaper, with the nav capsule sitting inside it. No amount of work on the
+        // capsule's own material could remove it, because it was never part of the capsule — it was
+        // the window behind it. Lucent draws its own gradient edge to edge and every surface on top
+        // is glass, so a scrim adds nothing but a visible seam.
+        // auto() rather than dark(): it keeps the automatic light/dark choice for the system ICONS
+        // (Lucent ships light and dark glass, and hard-coding white icons would lose them against a
+        // pale background) while making both scrims transparent. Only the scrim is being removed
+        // here — nothing else about the edge-to-edge behaviour changes.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
 
         val settingsRepo = SettingsRepository(applicationContext)
         // Read the saved appearance synchronously *before* the first frame is composed. DataStore
@@ -242,8 +268,15 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsRepo.themeMode.collectAsState(initial = initialThemeMode)
             val paletteName by settingsRepo.palette.collectAsState(initial = initialPalette)
             val fontKey by settingsRepo.font.collectAsState(initial = initialFont)
-            // Whether the drifting background animates (task: background on/off toggle). Default on.
-            val backgroundAnimated by settingsRepo.backgroundAnimationEnabled.collectAsState(initial = true)
+            // Whether the drifting background animates (task: background on/off toggle). The
+            // initial value comes from the synchronous startup read, NOT a hard-coded `true`:
+            // with `initial = true`, a user who had switched the effect OFF still got one or two
+            // frames of drifting blobs behind the splash cat before the async DataStore emission
+            // arrived — the splash and the app disagreed about the setting. Seeding with the real
+            // stored value keeps splash and app in step from the very first frame.
+            val backgroundAnimated by settingsRepo.backgroundAnimationEnabled.collectAsState(
+                initial = startup.backgroundAnimationEnabled
+            )
 
             // Keep the runtime language in step with the setting (localization task). L.current is
             // snapshot state, so this LaunchedEffect flipping it recomposes every S-reading text in
@@ -322,7 +355,10 @@ class MainActivity : ComponentActivity() {
                             LucentSplash(
                                 paletteColors = paletteColors,
                                 backdropColor = backdropColor,
-                                onFinished = { splashDone = true }
+                                onFinished = { splashDone = true },
+                                // The cat's backdrop follows the SAME setting as the app behind it:
+                                // drifting off in Settings means a still splash too (fix task).
+                                backgroundAnimated = backgroundAnimated
                             )
                         }
                     }
@@ -341,8 +377,33 @@ class MainActivity : ComponentActivity() {
         AppLockController.onStart()
     }
 
+    /**
+     * Leaving the foreground stops an in-flight LOCAL reply, unless the user has opted into
+     * background replies (task 2).
+     *
+     * The default matters more than it looks. A local reply holds the whole model in RAM for as long
+     * as it runs, and a user who switches away mid-reply has no idea that leaving the screen is what
+     * makes their phone crawl — from the outside it just gets slow, some minutes after they stopped
+     * using the app that caused it. So the default is to stop and free, and the conversation is left
+     * saying exactly that, with a pointer to the setting that would have kept it running.
+     *
+     * The read is a one-shot on the IO scope rather than a blocking read: onStop is on the main
+     * thread during a transition the user can see, and a DataStore round-trip here would show up as
+     * a stutter on the way out of the app.
+     */
     override fun onStop() {
         super.onStop()
+        if (AssistantController.sending && AssistantController.localTurnInFlight) {
+            val repo = SettingsRepository(applicationContext)
+            AppScope.io.launch {
+                val keepGoing = try {
+                    repo.localBackgroundReplyEnabledOnce()
+                } catch (t: Throwable) {
+                    false
+                }
+                withContext(Dispatchers.Main) { AssistantController.onAppBackgrounded(keepGoing) }
+            }
+        }
         AppLockController.onStop()
         // Refresh the content widgets as the app leaves the foreground, so the home screen shows
         // current data the moment the launcher reappears (ported from the first settings variant).
@@ -475,6 +536,15 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
         if (UnsavedChangesGuard.dirty) pendingNavigation = action else action()
     }
 
+    // Exiting while the on-device model is mid-reply (task 2).
+    //
+    // Leaving the app frees the model — that is the deliberate behaviour, and the right default for
+    // something holding gigabytes of RAM. But it also means the reply the user is waiting on stops,
+    // and there is no way to know that from the outside: you press back, the app closes, and when
+    // you come back the answer is simply not there. So the exit asks first, and says what the cost
+    // is. Only the LOCAL model gets this: a cloud reply survives the app closing.
+    var confirmExitWhileReplying by remember { mutableStateOf(false) }
+
     pendingNavigation?.let { action ->
         AlertDialog(
             onDismissRequest = { pendingNavigation = null },
@@ -518,8 +588,36 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                 backArmed = true
                 LucentToast.show(context, com.lucent.app.i18n.S.pressBackAgainToExit)
             }
+            // Second back with a local reply in flight: warn instead of closing. Deliberately
+            // placed AFTER the press-again-to-exit arming, so the warning appears at the moment the
+            // app would actually have closed rather than interrupting the first back press.
+            AssistantController.sending && AssistantController.localTurnInFlight ->
+                confirmExitWhileReplying = true
             else -> runOrConfirm { finishActivity() }
         }
+    }
+
+    if (confirmExitWhileReplying) {
+        AlertDialog(
+            onDismissRequest = { confirmExitWhileReplying = false },
+            title = { Text(com.lucent.app.i18n.S.lmExitWhileReplyingTitle) },
+            text = { Text(com.lucent.app.i18n.S.lmExitWhileReplyingBody) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmExitWhileReplying = false
+                    // Stop explicitly rather than relying on the process going away: this writes the
+                    // "reply stopped" marker into the conversation, so the thread the user comes
+                    // back to explains itself instead of just missing an answer.
+                    AssistantController.stopGeneration()
+                    runOrConfirm { finishActivity() }
+                }) { Text(com.lucent.app.i18n.S.lmExitAnyway) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmExitWhileReplying = false }) {
+                    Text(com.lucent.app.i18n.S.lmKeepWaiting)
+                }
+            }
+        )
     }
 
     CompositionLocalProvider(LocalHazeState provides hazeState) {
@@ -562,30 +660,44 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                     )
                 },
                 bottomBar = {
-                    // A single FLOATING glass capsule (7/8 width, four segments). It isn't sunk into a
-                    // solid bar — the bar slot is entirely transparent, and the capsule casts its own
-                    // soft drop shadow onto the drifting background so it reads as a piece of glass
-                    // hovering above the app rather than a rectangular strip glued to the bottom edge
-                    // (task 12). The glass treatment lives on the capsule itself: a haze blur, a
-                    // top-down specular highlight and a faint inner gloss layered inside it, and a
-                    // gradient rim that's brightest along the top edge — so it reads as a lit, curved
-                    // piece of glass (task 3).
+                    // A single FLOATING glass capsule (7/8 width, four segments), built by the same
+                    // subtraction that produced [frostedGlass] — and for the same reason.
+                    //
+                    // ### Why the blur had to go
+                    //
+                    // This capsule was the last surface in the app still trying to look like glass by
+                    // ADDING coats: a Haze blur, then a white fill on top of it, then a specular
+                    // sheen, then a counter-sheen gloss, then a rim. Five layers, each individually
+                    // defensible, stacking to something you could not see through at all — put a red
+                    // button behind it and no red came out the other side. Meanwhile every card in
+                    // the app looks like glass with two draws and an edge, because frostedGlass went
+                    // through this exact argument already and its comment records the conclusion:
+                    // the way to make a surface read as transparent is to stop painting it.
+                    //
+                    // Haze's lightest material (`ultraThin`) still lays a fixed ~30% tint of the
+                    // container colour over whatever is behind it — near-black on the dark theme.
+                    // That tint was the floor: no amount of thinning the fill or the sheens could get
+                    // under it, which is why the previous pass at this ("use ultraThin instead of
+                    // thin") moved the number and not the problem.
+                    //
+                    // So: no blur, no fill-on-top-of-blur, no sheen, no gloss. What is left is what
+                    // frostedGlass proved is enough — a fill light enough to read as a lift rather
+                    // than a coat, and one hairline rim shaded bright along the top edge — plus the
+                    // one thing a card does not need and a floating control does: a soft drop shadow,
+                    // so it reads as hovering ABOVE the page rather than printed onto it (task 5).
+                    // The colour behind it now comes through with its variation intact, and that
+                    // variation is the actual evidence of transparency (task 10).
                     val capsuleShape = RoundedCornerShape(percent = 50)
-                    // Capsule glass. Light on both themes now — a *lift*, not a coat, and never a
-                    // dark wash: a dark tint over the drifting palette desaturates it, which is what
-                    // turned the light theme grey. The pill is defined instead by its lit rim and by
-                    // the drop shadow it already casts (below), which is what makes a translucent
-                    // surface read as floating above the background rather than painted onto it.
                     val glassDark = onGradient.luminance() > 0.5f
                     val capsuleFill = Color.White.copy(
-                        alpha = if (glassDark) com.lucent.app.ui.LucentGlass.BLURRED_FILL_DARK
-                        else com.lucent.app.ui.LucentGlass.BLURRED_FILL_LIGHT
+                        alpha = if (glassDark) com.lucent.app.ui.LucentGlass.NAV_FILL_DARK
+                        else com.lucent.app.ui.LucentGlass.NAV_FILL_LIGHT
                     )
                     val capsuleRim = lucentGlassRim(strong = true)
-                    val capsuleSheenTop = if (glassDark) 0.12f else 0.26f
-                    val capsuleSheenMid = if (glassDark) 0.02f else 0.05f
-                    val capsuleGloss = if (glassDark) Color.White.copy(alpha = 0.05f) else Color.White.copy(alpha = 0.10f)
-                    val capsuleDivider = if (glassDark) Color.White.copy(alpha = 0.12f) else onGradient.copy(alpha = 0.16f)
+                    // Fainter than before: at the old 0.12/0.16 the three dividers read as structure —
+                    // as if the pill were a frame holding four separate panels — which is half of
+                    // what made it look like a plate with buttons sunk into it.
+                    val capsuleDivider = if (glassDark) Color.White.copy(alpha = 0.08f) else onGradient.copy(alpha = 0.10f)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -601,10 +713,17 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth(0.875f)
-                                .height(80.dp)
+                                // 66dp, down from 80dp. At 80 the "capsule" was as tall as a toolbar:
+                                // a rounded-cornered slab, which is exactly what it was described as.
+                                // Shorter, the same 50% corner radius finally reads as a pill — and
+                                // it hands ~14dp back to the screens underneath, which is what lets
+                                // the last row of the Settings list (the Data card) clear it (task 5).
+                                .height(66.dp)
                                 // Drop shadow FIRST (before clip), with the capsule shape and a soft
                                 // ambient/spot colour, so the pill visibly floats above whatever is
-                                // behind it. clip = false lets the blur spill past the bounds.
+                                // behind it. clip = false lets the blur spill past the bounds. Safe
+                                // here, unlike inside a card: this Box is in the bottomBar slot, not
+                                // inside the hazeSource capture layer that the card bug came from.
                                 .shadow(
                                     elevation = if (glassDark) 18.dp else 12.dp,
                                     shape = capsuleShape,
@@ -613,54 +732,17 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                                     spotColor = if (glassDark) Color.Black.copy(alpha = 0.45f) else Color(0xFF2A2A3A).copy(alpha = 0.34f)
                                 )
                                 .clip(capsuleShape)
-                                // The lightest Haze material, tinted with the app's smoke colour
-                                // (task 1). It used to be `thin`, which laid a heavier tint under
-                                // the white overlays and pushed the capsule over into opacity. With
-                                // `ultraThin` the blurred background stays visible *through* the
-                                // pill, which is the whole point of the material.
-                                .hazeEffect(
-                                    state = hazeState,
-                                    style = HazeMaterials.ultraThin(
-                                        if (glassDark) com.lucent.app.ui.LucentGlass.HazeContainerDark
-                                        else com.lucent.app.ui.LucentGlass.HazeContainerLight
-                                    )
-                                )
                                 .background(capsuleFill)
                                 // Gradient rim: a bright catch of light along the top, fading to a
                                 // faint edge at the bottom — the tell-tale of a curved glass surface.
-                                // Lifted to a 1.5dp, brighter rim so the glass edge is more defined.
+                                // With the sheens gone this is now the only thing modelling the
+                                // curve, so it stays at 1.5dp rather than the cards' hairline.
                                 .border(
                                     1.5.dp,
                                     capsuleRim,
                                     capsuleShape
                                 )
                         ) {
-                            // Specular highlight: a soft sheen concentrated at the top, thinning out
-                            // toward the middle — light landing on the top curve of the capsule.
-                            Box(
-                                modifier = Modifier
-                                    .matchParentSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            0f to Color.White.copy(alpha = capsuleSheenTop),
-                                            0.45f to Color.White.copy(alpha = capsuleSheenMid),
-                                            1f to Color.Transparent
-                                        )
-                                    )
-                            )
-                            // Gloss: a faint bottom-up counter-sheen so the lower half isn't dead
-                            // flat, giving the surface a subtle depth.
-                            Box(
-                                modifier = Modifier
-                                    .matchParentSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            0f to Color.Transparent,
-                                            0.72f to Color.Transparent,
-                                            1f to capsuleGloss
-                                        )
-                                    )
-                            )
                             Row(
                                 modifier = Modifier
                                     .matchParentSize()
@@ -672,7 +754,7 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                                         Box(
                                             modifier = Modifier
                                                 .width(1.dp)
-                                                .height(28.dp)
+                                                .height(24.dp)
                                                 .background(capsuleDivider)
                                         )
                                     }
@@ -688,17 +770,28 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                     }
                 }
             ) { padding ->
-                // The header only collapses on the list screens, so only their content feeds the
-                // scroll behaviour. Assistant and Settings scroll freely without touching the header.
+                // The capsule floats over the content now (task 12): the content is NOT inset by
+                // the bar's height any more — only the top bar's inset is applied — so lists and
+                // cards extend to the very bottom edge and slide *under* the pill, which is what
+                // lets its blur pick them up. The bottom inset the Scaffold measured for the bar is
+                // instead handed to the screens via LocalBottomBarInset, and each one reserves that
+                // much at the bottom of its own scrollable region so nothing ends up trapped behind
+                // the capsule. (Previously this was `.padding(padding)`, which reserved the whole
+                // bar height and left the pill hovering over a blank band — a docked bar, not a
+                // floating one.)
+                val topPad = padding.calculateTopPadding()
+                val bottomInset = padding.calculateBottomPadding()
                 val contentModifier = if (headerCollapsible) {
-                    Modifier.padding(padding).fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection)
+                    Modifier.padding(top = topPad).fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection)
                 } else {
-                    Modifier.padding(padding).fillMaxSize()
+                    Modifier.padding(top = topPad).fillMaxSize()
                 }
                 // The four tabs are kept alive across switches rather than torn down and rebuilt
                 // (see KeepAliveTabs) — this is what stops the drifting background from stuttering
                 // every time you change tabs.
-                KeepAliveTabs(active = currentScreen, modifier = contentModifier)
+                CompositionLocalProvider(LocalBottomBarInset provides bottomInset) {
+                    KeepAliveTabs(active = currentScreen, modifier = contentModifier)
+                }
             }
 
             // A share sent into Lucent (task 6) surfaces here as a small "note or task?" chooser,
@@ -725,12 +818,16 @@ private fun CapsuleNavItem(
             .clip(RoundedCornerShape(percent = 50))
             // The selected pill follows the theme's content colour: a white wash on dark, a dark
             // wash on light. A fixed white one vanished against the light theme's smoked capsule.
-            .then(if (selected) Modifier.background(onGradient.copy(alpha = 0.14f)) else Modifier)
+            //
+            // Eased from 0.14 to 0.10 along with the rest of the capsule. It used to be the most
+            // opaque thing on the bar, which inverted the intended reading: the selected tab looked
+            // like a solid chip embedded in a frame, rather than a highlight drawn on glass.
+            .then(if (selected) Modifier.background(onGradient.copy(alpha = 0.10f)) else Modifier)
             .clickable {
                 com.lucent.app.ui.Haptics.tick(context)
                 onClick()
             }
-            .padding(vertical = 6.dp),
+            .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -741,7 +838,10 @@ private fun CapsuleNavItem(
         } else {
             Icon(iconFor(screen), contentDescription = screen.label, tint = tint)
         }
-        Text(screen.label, color = tint, fontSize = 11.sp)
+        // maxLines = 1 with no ellipsis: every label in all four languages is short enough to fit
+        // at this size, and pinning it to one line means a long translation would overflow visibly
+        // in testing rather than silently truncating to "数..." in a shipped build (task 5).
+        Text(screen.label, color = tint, fontSize = 11.sp, maxLines = 1)
     }
 }
 
