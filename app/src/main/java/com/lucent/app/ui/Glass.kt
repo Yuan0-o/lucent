@@ -119,6 +119,19 @@ object LucentGlass {
     const val NAV_FILL_LIGHT = 0.11f
 }
 
+/**
+ * The destructive-action red, and the only fully opaque fill in the app.
+ *
+ * Deliberately theme-independent. Every other colour here adapts to light/dark and to the chosen
+ * palette, because a surface that sits *under* content should agree with what is around it. A
+ * destructive button is the opposite case: it must look the same on every palette, in both themes,
+ * and against whichever background blob happens to be drifting behind it, because the one thing it
+ * cannot afford is to be mistaken for an ordinary button on some particular colour scheme. So it is
+ * a fixed slab with a fixed rim, and it is legible with white text in every combination.
+ */
+val DANGER_RED = Color(0xFFD92D20)
+val DANGER_RED_RIM = Color(0xFF9B1C14)
+
 /** True when the current theme draws light-on-dark. */
 @Composable
 fun isDarkGlass(): Boolean = LocalOnGradient.current.luminance() > 0.5f

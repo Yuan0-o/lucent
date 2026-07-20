@@ -5,15 +5,22 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,30 +35,29 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Groups
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -70,22 +76,25 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lucent.app.AppNavigation
 import com.lucent.app.AppScope
 import com.lucent.app.Screen
@@ -917,40 +926,112 @@ fun NotesScreen(active: Boolean = true) {
             // action header) and the bottom band. A drag is only armed when it *starts* inside the
             // central band; the inner Column still owns vertical scrolling, and the top action strip
             // still owns its own horizontal scroll (a child wins that gesture over this ancestor).
+            // ---- Animated page-to-page swipe (task 7) ----
+            //
+            // The gesture already worked; what it lacked was any sense of movement. A drag past the
+            // threshold simply swapped the content, so the next note appeared fully formed with no
+            // indication that anything had travelled — indistinguishable, from the user's side, from
+            // the page having been redrawn for some unrelated reason. Direction is the whole meaning
+            // of a horizontal swipe, and the old version showed none of it.
+            //
+            // So the page now follows the finger and completes the journey on release:
+            //
+            //  - **While dragging**, the content tracks the finger 1:1 and fades slightly as it goes,
+            //    so the gesture is reversible — let go early and it springs back, which is the only
+            //    way a user can discover the threshold without being punished for finding it.
+            //  - **At the ends of the list** the drag is damped to a third (RESIST) instead of being
+            //    ignored. A dead gesture reads as a broken one; a stiff one reads as a wall, which is
+            //    what it actually is.
+            //  - **On release past the threshold** the outgoing page finishes its exit in the
+            //    direction of travel, then the incoming page enters from the opposite edge. Exit is
+            //    faster than entry (accelerating out, decelerating in) — the standard asymmetry that
+            //    makes the pair read as one continuous movement rather than two separate slides.
+            //
+            // [swipeOffset] is deliberately remembered WITHOUT a key on the note id: it has to
+            // survive the content swap in the middle of the animation, because the exit and the entry
+            // are two halves of one gesture, not two animations.
             val swipeList = sortedNotes
+            val swipeOffset = remember { Animatable(0f) }
+            var pageWidth by remember { mutableFloatStateOf(0f) }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .onSizeChanged { pageWidth = it.width.toFloat() }
                     .pointerInput(note.id, swipeList) {
-                        var totalDrag = 0f
                         var armed = false
+                        var atEnd = false
                         val threshold = 72.dp.toPx()
                         val topExclusion = 88.dp.toPx()
                         val bottomExclusion = 88.dp.toPx()
                         detectHorizontalDragGestures(
                             onDragStart = { start ->
-                                totalDrag = 0f
                                 armed = start.y >= topExclusion && start.y <= size.height - bottomExclusion
+                                atEnd = false
                             },
                             onDragEnd = {
                                 if (armed) {
                                     val idx = swipeList.indexOfFirst { it.id == note.id }
-                                    if (idx >= 0) {
-                                        if (totalDrag <= -threshold && idx < swipeList.lastIndex) {
-                                            openDetail(swipeList[idx + 1])
-                                        } else if (totalDrag >= threshold && idx > 0) {
-                                            openDetail(swipeList[idx - 1])
+                                    val travelled = swipeOffset.value
+                                    val goNext = travelled <= -threshold && idx >= 0 && idx < swipeList.lastIndex
+                                    val goPrev = travelled >= threshold && idx > 0
+                                    val width = if (pageWidth > 0f) pageWidth else threshold * 6f
+                                    scope.launch {
+                                        when {
+                                            goNext -> {
+                                                swipeOffset.animateTo(-width, tween(SWIPE_EXIT_MS, easing = FastOutLinearInEasing))
+                                                openDetail(swipeList[idx + 1])
+                                                swipeOffset.snapTo(width)
+                                                swipeOffset.animateTo(0f, tween(SWIPE_ENTER_MS, easing = LinearOutSlowInEasing))
+                                            }
+                                            goPrev -> {
+                                                swipeOffset.animateTo(width, tween(SWIPE_EXIT_MS, easing = FastOutLinearInEasing))
+                                                openDetail(swipeList[idx - 1])
+                                                swipeOffset.snapTo(-width)
+                                                swipeOffset.animateTo(0f, tween(SWIPE_ENTER_MS, easing = LinearOutSlowInEasing))
+                                            }
+                                            // Not far enough, or nothing to move to: spring home.
+                                            else -> swipeOffset.animateTo(
+                                                0f,
+                                                spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            )
                                         }
                                     }
                                 }
+                                armed = false
                             },
-                            onHorizontalDrag = { _, dragAmount -> if (armed) totalDrag += dragAmount }
+                            onDragCancel = {
+                                armed = false
+                                scope.launch { swipeOffset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                if (armed) {
+                                    val idx = swipeList.indexOfFirst { it.id == note.id }
+                                    // Damp the drag when there is nothing in that direction to reach,
+                                    // so the end of the list feels like a wall rather than a fault.
+                                    val blocked = idx < 0 ||
+                                        (dragAmount < 0 && idx >= swipeList.lastIndex) ||
+                                        (dragAmount > 0 && idx <= 0)
+                                    atEnd = blocked
+                                    change.consume()
+                                    scope.launch {
+                                        swipeOffset.snapTo(swipeOffset.value + if (blocked) dragAmount * SWIPE_RESIST else dragAmount)
+                                    }
+                                }
+                            }
                         )
                     }
             ) {
               Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = swipeOffset.value
+                        // A gentle fade tied to how far the page has travelled. It never reaches
+                        // fully transparent during a drag — a page you can still see is a page you
+                        // can still change your mind about.
+                        alpha = 1f - (kotlin.math.abs(swipeOffset.value) / (pageWidth.takeIf { it > 0f } ?: 1f))
+                            .coerceIn(0f, 1f) * 0.35f
+                    }
                     .padding(16.dp)
                     .verticalScroll(rememberScrollState())
                     .padding(bottom = LocalBottomBarInset.current)
@@ -1025,7 +1106,20 @@ fun NotesScreen(active: Boolean = true) {
                     }
                 }
 
-                Column(modifier = Modifier.fillMaxWidth().frostedGlass(tint = NoteColor.fromKey(note.color).swatch).padding(16.dp)) {
+                // Long-press anywhere on this card to copy the note's content (task 1). It is on
+                // the card rather than on the body Text so the target is the whole readable area,
+                // including the padding — a long-press that lands a few pixels off the last line
+                // should still work. The title/date block below is inside a SelectionContainer,
+                // which consumes long-press for the platform's own text-selection toolbar, so a
+                // press there still selects rather than copying; that is the correct split, since
+                // someone pressing directly on the title is asking for the title.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .longPressCopy(context, copyTextForNote(note))
+                        .frostedGlass(tint = NoteColor.fromKey(note.color).swatch)
+                        .padding(16.dp)
+                ) {
                     // Title/date/tags sit in a SelectionContainer so the reader gets the platform's
                     // native text-selection toolbar. The body is *outside* it, because a Markdown
                     // body carries tappable links and selection would swallow those taps — and the
@@ -1359,6 +1453,20 @@ private fun shareTextForNote(note: Note): String {
     val body = if (note.isChecklist) Checklist.toMarkdown(note.checklist) else note.body
     return if (note.title.isBlank()) body else "${note.title}\n\n$body"
 }
+
+/**
+ * What a long-press on the detail page copies: the note's CONTENT and nothing else.
+ *
+ * Deliberately not [shareTextForNote]. Sharing sends someone else a note, so it leads with the
+ * title for context. Copying is almost always a step in moving the text somewhere you are already
+ * working — a message, a document, another note — and there the title and the timestamp are
+ * exactly the two things you would have to delete by hand afterwards. So they are not included.
+ *
+ * A checklist note copies as its items (one per line, ticked state preserved) because that IS its
+ * content; a prose note copies as its body, verbatim, with no Markdown added or stripped.
+ */
+private fun copyTextForNote(note: Note): String =
+    if (note.isChecklist) Checklist.toMarkdown(note.checklist).trim() else note.body.trim()
 
 /**
  * A single note as a card in the two-per-row home grid.

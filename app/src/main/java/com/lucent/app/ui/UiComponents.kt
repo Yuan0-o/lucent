@@ -64,6 +64,29 @@ import androidx.compose.ui.unit.sp
 import java.util.Calendar
 
 /**
+ * Tuning for the note/task detail page's swipe-between-items animation (task 7).
+ *
+ * Shared by both detail pages because they are the same gesture on two screens, and a swipe that
+ * felt different on notes than on tasks would be a bug rather than a flourish.
+ *
+ * Exit is shorter than entry on purpose. The outgoing page is leaving with the finger's own
+ * momentum, so it should accelerate away ([FastOutLinearInEasing]); the incoming page is arriving
+ * under its own steam and should settle ([LinearOutSlowInEasing]). Equal durations read as a
+ * mechanical slideshow — this asymmetry is what makes the two halves read as one movement.
+ */
+const val SWIPE_EXIT_MS = 160
+
+/** How long the incoming page takes to settle. See [SWIPE_EXIT_MS]. */
+const val SWIPE_ENTER_MS = 220
+
+/**
+ * Drag multiplier applied when there is nothing to swipe to in that direction. Not zero: a gesture
+ * that does nothing at all reads as broken, whereas one that moves a little and pulls back reads as
+ * the end of the list, which is what it is.
+ */
+const val SWIPE_RESIST = 0.33f
+
+/**
  * The primary pill button used for "Edit note" / "Edit task" / "Archive".
  *
  * ### Why the Haze blur was removed (task 2)
@@ -136,9 +159,21 @@ fun GlassCapsuleButton(
  * nested inside the `hazeSource` container that captures the background is what once painted a pale
  * rectangle inside every card in the app.
  *
- * [danger] switches the tint to red for destructive actions, keeping the *material* identical while
- * making the meaning unmistakable — the difference between "this is a button" and "this button
- * deletes things" should be carried by colour, not by suddenly changing what buttons are made of.
+ * [danger] is the one deliberate exception to the glass rule, and it is an exception on purpose.
+ *
+ * ### Why the destructive buttons are solid, not glass
+ *
+ * Every other surface in Lucent is translucent because translucency is *pleasant*: it lets the
+ * backdrop through, it reads as light, it invites you in. That is exactly the wrong signal for the
+ * four buttons on Settings > Data that erase your notes, your tasks, your chats, or all three. A
+ * red wash at 16–22% alpha over a drifting background is a red *suggestion*: on a pale palette it
+ * nearly vanishes, and its colour shifts as the background blobs move under it, so the one control
+ * on the page you must not press by accident is also the one whose appearance you cannot rely on.
+ *
+ * So danger buttons are drawn as a flat, fully opaque red slab with white text. They are meant to
+ * look heavier than everything around them, to stop the eye, and to look identical on every palette
+ * and in both themes. Consistency of material matters right up until the material starts hiding the
+ * consequences, and then legibility wins.
  *
  * A disabled button fades rather than disappearing, and swallows its tap: callers that want a
  * *reason* shown on tap (the greyed-out controls in local-model mode, task 8) keep [enabled] true
@@ -159,22 +194,18 @@ fun GlassButton(
     val shape = RoundedCornerShape(percent = 50)
     val glassDark = isDarkGlass()
 
-    // Danger keeps the glass and changes only the hue: a red wash, a red rim, red text. The two
-    // alphas differ by theme for the same reason every other surface's do — a light wash reads on a
-    // dark backdrop and washes out on a light one.
-    val dangerHue = Color(0xFFE5484D)
+    // Danger is a solid slab, not a tint. DANGER_RED is the same hue the old wash used, at full
+    // opacity, and it is identical on both themes on purpose: a destructive control should not
+    // change appearance with the palette, and white-on-red is legible on every backdrop there is.
+    // The darker rim is what stops the slab reading as a flat sticker against a bright background.
+    val dangerFill = DANGER_RED
+    val dangerRim = DANGER_RED_RIM
     val fill = when {
-        danger && glassDark -> dangerHue.copy(alpha = 0.22f)
-        danger -> dangerHue.copy(alpha = 0.16f)
+        danger -> dangerFill
         glassDark -> Color.White.copy(alpha = LucentGlass.CARD_FILL_DARK)
         else -> Color.White.copy(alpha = LucentGlass.CARD_FILL_LIGHT)
     }
-    val border = if (danger) dangerHue.copy(alpha = if (glassDark) 0.55f else 0.45f) else Color.Transparent
-    val label = when {
-        danger && glassDark -> Color(0xFFFFB4AB)
-        danger -> Color(0xFF8C1D18)
-        else -> onGradient
-    }
+    val label = if (danger) Color.White else onGradient
     val fade = if (enabled) 1f else 0.38f
 
     Row(
@@ -182,7 +213,7 @@ fun GlassButton(
             .clip(shape)
             .background(fill.copy(alpha = fill.alpha * fade))
             .then(
-                if (danger) Modifier.border(1.dp, border.copy(alpha = border.alpha * fade), shape)
+                if (danger) Modifier.border(1.dp, dangerRim.copy(alpha = dangerRim.alpha * fade), shape)
                 else Modifier.border(1.dp, lucentGlassRim(strong = true), shape)
             )
             .clickable(enabled = enabled) {

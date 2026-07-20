@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -60,6 +63,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lucent.app.AppScope
@@ -247,6 +251,34 @@ fun SettingsScreen(active: Boolean = true) {
     // device that didn't have the password. Blank means the default export uses the portable
     // built-in key; a password is only applied if the user deliberately types one this time.
     var exportPasswordDraft by remember { mutableStateOf("") }
+    // Which sections the next export writes (task 9). Defaults to everything except the model
+    // files, which is byte-for-byte what an export produced before this was selectable — so the
+    // common case is unchanged and the choice only costs anyone who wants it.
+    var exportModules by remember { mutableStateOf(BackupManager.DEFAULT_MODULES) }
+    // Per-item selection (second-level menu). Null means "everything in that module", which is the
+    // default and what every previous release did; a non-null set is an explicit subset the user
+    // built by hand. Kept null until they actually open the sub-menu, so the common path never pays
+    // to enumerate every note and task.
+    var exportNoteIds by remember { mutableStateOf<Set<Long>?>(null) }
+    var exportTaskIds by remember { mutableStateOf<Set<Long>?>(null) }
+    // Which second-level picker is open, if any.
+    var itemPicker by remember { mutableStateOf<ExportItemKind?>(null) }
+    // The item lists behind the second-level picker. Loaded only while the export dialog is open:
+    // reading every note and task is cheap, but doing it on a Settings screen nobody is exporting
+    // from is work for nothing, and on a large database it is work for nothing on every recomposition.
+    var allNotes by remember { mutableStateOf<List<com.lucent.app.data.Note>>(emptyList()) }
+    var allTasks by remember { mutableStateOf<List<com.lucent.app.data.Task>>(emptyList()) }
+    LaunchedEffect(showExportDialog) {
+        if (showExportDialog) {
+            val loadedNotes = withContext(Dispatchers.IO) { db.noteDao().getAllOnce() }
+            val loadedTasks = withContext(Dispatchers.IO) { db.taskDao().getAllOnce() }
+            allNotes = loadedNotes
+            allTasks = loadedTasks
+        }
+    }
+    // Which sections a restore applies. Populated from the file's own contents when the preview
+    // opens, so the list offers what is actually in the file rather than a fixed menu of maybes.
+    var restoreModules by remember { mutableStateOf(BackupManager.DEFAULT_MODULES) }
     var exportPasswordVisible by remember { mutableStateOf(false) }
 
     // A backup that needs a password we don't have. The bytes are held here rather than re-read on
@@ -620,6 +652,11 @@ fun SettingsScreen(active: Boolean = true) {
     ) { uri: Uri? ->
         if (uri != null) {
             val password = exportPassword
+            val chosenSelection = BackupManager.BackupSelection(
+                modules = exportModules,
+                noteIds = exportNoteIds,
+                taskIds = exportTaskIds
+            )
             scope.launch {
                 // The full payload — notes (archived included), tasks, note version history, chats,
                 // conversations, every attachment, and all settings — sealed as one file. All of it,
@@ -629,7 +666,7 @@ fun SettingsScreen(active: Boolean = true) {
                 val result = withContext(Dispatchers.IO) {
                     try {
                         context.contentResolver.openOutputStream(uri)?.use { out ->
-                            BackupManager.exportEncrypted(context, db, repo, out, password)
+                            BackupManager.exportEncrypted(context, db, repo, out, password, chosenSelection)
                         } ?: return@withContext S.backupWriteFailed
                         if (password.isNullOrEmpty()) {
                             S.backupSavedBuiltIn
@@ -670,6 +707,57 @@ fun SettingsScreen(active: Boolean = true) {
                     Text(S.exportBackupBody, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(14.dp))
 
+                    // ---- What to include (task 9) ----
+                    Text(S.backupChooseWhat, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // Notes and tasks carry a second level: tick the module to include it, or tap
+                    // "choose…" to pick individual items. The count in the sub-label is the whole
+                    // point of putting it here rather than only inside the sub-menu — "12 of 40"
+                    // tells you at a glance that this is not a complete backup, which is the one
+                    // fact a partial selection must never hide.
+                    BackupModuleRow(
+                        label = S.backupModNotes,
+                        module = BackupManager.BackupModule.NOTES,
+                        selected = exportModules,
+                        subLabel = exportNoteIds?.let { S.backupNOfM(it.size, allNotes.size) },
+                        onChooseItems = { itemPicker = ExportItemKind.NOTES },
+                        onChange = { exportModules = it }
+                    )
+                    BackupModuleRow(
+                        label = S.backupModTasks,
+                        module = BackupManager.BackupModule.TASKS,
+                        selected = exportModules,
+                        subLabel = exportTaskIds?.let { S.backupNOfM(it.size, allTasks.size) },
+                        onChooseItems = { itemPicker = ExportItemKind.TASKS },
+                        onChange = { exportModules = it }
+                    )
+                    BackupModuleRow(S.backupModChats, BackupManager.BackupModule.CHATS, exportModules) { exportModules = it }
+                    BackupModuleRow(S.backupModSettings, BackupManager.BackupModule.SETTINGS, exportModules) { exportModules = it }
+                    BackupModuleRow(S.backupModApi, BackupManager.BackupModule.API, exportModules) { exportModules = it }
+                    BackupModuleRow(S.backupModLocalAssistant, BackupManager.BackupModule.LOCAL_ASSISTANT, exportModules) { exportModules = it }
+                    // The model files are offered only when there are some, and always with their
+                    // real size attached: "include local model files" means something very
+                    // different at 40 MB than at 4 GB, and the number is the only honest way to
+                    // say which one this phone is about to do.
+                    val modelBytes = remember { LocalModelStore.totalModelBytes(context) }
+                    if (modelBytes > 0L) {
+                        BackupModuleRow(
+                            S.backupModLocalModelFiles,
+                            BackupManager.BackupModule.LOCAL_MODEL_FILES,
+                            exportModules
+                        ) { exportModules = it }
+                        Text(
+                            S.backupModLocalModelFilesDesc(AttachmentLimits.formatBytes(modelBytes)),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
+                        )
+                    }
+                    if (BackupManager.BackupSelection(exportModules, exportNoteIds, exportTaskIds).isEmpty) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(S.backupSelectionEmpty, color = DANGER_RED, fontSize = 12.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
                     Text(S.addPasswordOptional, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(S.exportPasswordExplain, fontSize = 13.sp)
@@ -700,6 +788,7 @@ fun SettingsScreen(active: Boolean = true) {
             // device still (correctly) asks for it, so the default file stays portable regardless.
             confirmButton = {
                 Button(
+                    enabled = !BackupManager.BackupSelection(exportModules, exportNoteIds, exportTaskIds).isEmpty,
                     onClick = {
                         val password = exportPasswordDraft.ifBlank { null }
                         if (password != null) {
@@ -715,6 +804,35 @@ fun SettingsScreen(active: Boolean = true) {
         )
     }
     if (showExportDialog) { ExportBackupDialog() }
+
+    // Second-level picker for individual notes / tasks. Rendered as a sibling of the export dialog
+    // rather than nested inside it: an AlertDialog inside an AlertDialog is a platform arrangement
+    // with no good behaviour, and this way dismissing the picker returns to an export dialog that
+    // never went away and still holds the password the user had already typed.
+    itemPicker?.let { kind ->
+        val isNotes = kind == ExportItemKind.NOTES
+        val ids: List<Pair<Long, String>> = if (isNotes) {
+            allNotes.map { it.id to it.title.ifBlank { S.untitled } }
+        } else {
+            allTasks.map { it.id to it.title.ifBlank { S.untitledTask } }
+        }
+        val current = (if (isNotes) exportNoteIds else exportTaskIds) ?: ids.map { it.first }.toSet()
+        ExportItemPickerDialog(
+            title = if (isNotes) S.backupPickNotesTitle else S.backupPickTasksTitle,
+            items = ids,
+            selected = current,
+            onDone = { picked ->
+                // A full selection is stored back as null ("everything"), not as an explicit set of
+                // every id. That keeps the manifest honest if items are added between choosing and
+                // exporting, and it is what makes the "12 of 40" sub-label disappear again when the
+                // user re-ticks everything.
+                val collapsed = if (picked.size == ids.size) null else picked
+                if (isNotes) exportNoteIds = collapsed else exportTaskIds = collapsed
+                itemPicker = null
+            },
+            onDismiss = { itemPicker = null }
+        )
+    }
 
     // =======================================================================================
     // Backup: import
@@ -883,6 +1001,63 @@ fun SettingsScreen(active: Boolean = true) {
                         if (preview.hasSettings) {
                             BackupContentLine(S.bkSettings, 1, listOf(S.bkIncludingApiKeys))
                         }
+                        if (preview.modelFiles > 0) {
+                            BackupContentLine(
+                                S.backupModLocalModelFiles,
+                                preview.modelFiles,
+                                listOf(AttachmentLimits.formatBytes(preview.modelBytes))
+                            )
+                        }
+
+                        // ---- Restore only part of it (task 9) ----
+                        //
+                        // The same module list as the export dialog, but narrowed to what this file
+                        // actually contains: offering to restore tasks from a notes-only backup is
+                        // a checkbox that can only disappoint. `available` is computed from the
+                        // preview's real counts rather than from the manifest's "modules" list, so
+                        // a pre-v10 backup — which has no such list — still gets an accurate menu.
+                        val available = buildSet {
+                            if (preview.notes > 0) add(BackupManager.BackupModule.NOTES)
+                            if (preview.tasks > 0) add(BackupManager.BackupModule.TASKS)
+                            if (preview.chatMessages > 0 || preview.conversations > 0) {
+                                add(BackupManager.BackupModule.CHATS)
+                            }
+                            if (preview.hasSettings) {
+                                add(BackupManager.BackupModule.SETTINGS)
+                                add(BackupManager.BackupModule.API)
+                                add(BackupManager.BackupModule.LOCAL_ASSISTANT)
+                            }
+                            if (preview.modelFiles > 0) add(BackupManager.BackupModule.LOCAL_MODEL_FILES)
+                        }
+                        // Start with everything the file has selected: restoring all of it is what
+                        // the button used to do, so that stays the default and opting out is the
+                        // deliberate act.
+                        LaunchedEffect(preview) { restoreModules = available }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(S.restoreChooseWhat, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (BackupManager.BackupModule.NOTES in available) {
+                            BackupModuleRow(S.backupModNotes, BackupManager.BackupModule.NOTES, restoreModules) { restoreModules = it }
+                        }
+                        if (BackupManager.BackupModule.TASKS in available) {
+                            BackupModuleRow(S.backupModTasks, BackupManager.BackupModule.TASKS, restoreModules) { restoreModules = it }
+                        }
+                        if (BackupManager.BackupModule.CHATS in available) {
+                            BackupModuleRow(S.backupModChats, BackupManager.BackupModule.CHATS, restoreModules) { restoreModules = it }
+                        }
+                        if (BackupManager.BackupModule.SETTINGS in available) {
+                            BackupModuleRow(S.backupModSettings, BackupManager.BackupModule.SETTINGS, restoreModules) { restoreModules = it }
+                            BackupModuleRow(S.backupModApi, BackupManager.BackupModule.API, restoreModules) { restoreModules = it }
+                            BackupModuleRow(S.backupModLocalAssistant, BackupManager.BackupModule.LOCAL_ASSISTANT, restoreModules) { restoreModules = it }
+                        }
+                        if (BackupManager.BackupModule.LOCAL_MODEL_FILES in available) {
+                            BackupModuleRow(S.backupModLocalModelFiles, BackupManager.BackupModule.LOCAL_MODEL_FILES, restoreModules) { restoreModules = it }
+                        }
+                        if (restoreModules.isEmpty()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(S.backupSelectionEmpty, color = DANGER_RED, fontSize = 12.sp)
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -891,13 +1066,14 @@ fun SettingsScreen(active: Boolean = true) {
             },
             confirmButton = {
                 Button(
-                    enabled = !preview.isEmpty,
+                    enabled = !preview.isEmpty && restoreModules.isNotEmpty(),
                     onClick = {
                         importPreview = null
+                        val chosen = restoreModules
                         scope.launch {
                             backupStatus = withContext(Dispatchers.IO) {
                                 try {
-                                    BackupManager.commit(context, db, repo, preview)
+                                    BackupManager.commit(context, db, repo, preview, chosen)
                                 } catch (e: Exception) {
                                     S.importFailed(e.message ?: "")
                                 }
@@ -1147,20 +1323,76 @@ fun SettingsScreen(active: Boolean = true) {
                         db.taskDao().getAllOnce().forEach {
                             com.lucent.app.reminders.ReminderScheduler.cancel(appContext, it.id)
                         }
+                        // ---- Database rows ----
                         db.noteVersionDao().clearAll()
                         db.noteDao().clearAll()
                         db.taskDao().clearAll()
                         db.chatDao().clearAll()
                         db.chatConversationDao().clearAll()
+
+                        // ---- Preferences ----
                         repo.clearAll()
+                        // The usage scores live in their OWN DataStore (lucent_usage), which
+                        // repo.clearAll() has never touched — see UsageTracker.clearAll.
+                        com.lucent.app.data.UsageTracker.clearAll(appContext)
+
+                        // ---- Files on disk ----
                         // Nothing references anything on disk any more, so sweeping with an
                         // empty "referenced ids" set drops every stored attachment file. If
                         // we skipped this, the files would just sit there until the next
                         // startup ran the orphan sweep — cleaner to free the space now so
                         // the storage figure matches what the user just did.
                         com.lucent.app.data.AttachmentStore.pruneOrphans(appContext, emptySet())
+                        // Decrypted attachment previews are copies of the user's files sitting
+                        // in cacheDir. The OS clears that eventually; "delete everything" should
+                        // not mean "eventually".
+                        com.lucent.app.data.AttachmentAccess.clearPreviewCache(appContext)
+
+                        // ---- The imported local models (task 8) ----
+                        //
+                        // This is the omission that prompted the task, and it was the largest
+                        // thing on disk by three orders of magnitude: a wipe could leave four
+                        // gigabytes of GGUF behind while reporting that all data had been
+                        // cleared. LocalModelStore.deleteAll had existed, correctly written and
+                        // documented as "used when wiping all data", and simply was never called
+                        // from anywhere — dead code that read as a finished feature.
+                        //
+                        // Shut the engine down FIRST. The active model may be resident in memory
+                        // with its file open; deleting underneath a live llama context risks a
+                        // native fault, and on some filesystems the bytes are not freed until the
+                        // last handle closes, so the space would not even come back.
+                        com.lucent.app.local.LocalLlm.shutdown()
+                        com.lucent.app.local.LocalModelStore.deleteAll(appContext)
+
+                        // ---- Diagnostics and one-off markers ----
+                        com.lucent.app.data.StartupLog.clear(appContext)
+                        com.lucent.app.data.StartupLog.setEnabled(false)
+                        // A "your database couldn't be decrypted" notice describes a database
+                        // that no longer exists, so it must not survive into the fresh app.
+                        com.lucent.app.data.DatabaseEncryption.clearLockedNotice(appContext)
+                        // Set-aside database copies: a failed decryption parks the old DB beside
+                        // the live one rather than deleting it, which is right in normal operation
+                        // and wrong here — a wipe that leaves multi-megabyte snapshots of the data
+                        // it claims to have erased is not the reinstall it promises.
+                        com.lucent.app.data.DatabaseEncryption.purgeSetAsideDatabases(appContext)
+
+                        // ---- OS-level state the app owns ----
+                        // The share-sheet entry is a manifest component, not a preference: the
+                        // preference has just been reset to its default, so the component has to
+                        // follow it or the app keeps advertising an integration it believes is
+                        // off. Same class of bug as a reminder outliving its task.
+                        com.lucent.app.data.ShareIntegration.setEnabled(appContext, false)
+                        // Home-screen widgets keep rendering their last known rows until told
+                        // otherwise, so without this the user's launcher would still be showing
+                        // tasks from the data they just erased.
+                        com.lucent.app.widget.WidgetUpdater.refreshContent(appContext)
+
                         withContext(Dispatchers.Main) {
                             backupStatus = ""
+                            // The assistant holds the current conversation id in memory; the row
+                            // it points at is gone, so reset it to the greeting rather than
+                            // leaving it observing a conversation that no longer exists.
+                            AssistantController.onAllChatsCleared(appContext)
                             LucentToast.show(appContext, S.allDataClearedToast)
                         }
                     }
@@ -2123,9 +2355,9 @@ fun SettingsScreen(active: Boolean = true) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(S.apiFrozenBody, color = onGradientMuted, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { route = SettingsRoute.LocalModel }) {
-                        Text(S.apiFrozenManage, color = onGradient)
-                    }
+                    // Glass, like every other page-level button in Settings. This was one of
+                    // the last Material 3 controls left on a page made entirely of glass.
+                    GlassButton(text = S.apiFrozenManage, onClick = { route = SettingsRoute.LocalModel })
                 }
             }
 
@@ -2178,10 +2410,7 @@ fun SettingsScreen(active: Boolean = true) {
                 }
                 if (profiles.size < com.lucent.app.data.ApiProfiles.MAX) {
                     Spacer(modifier = Modifier.height(4.dp))
-                    TextButton(onClick = { addProfile() }) {
-                        Icon(Icons.Default.Add, contentDescription = null, tint = onGradient)
-                        Text(" " + S.apiAddButton, color = onGradient)
-                    }
+                    GlassButton(text = S.apiAddButton, icon = Icons.Default.Add, onClick = { addProfile() })
                 }
             }
 
@@ -2653,12 +2882,12 @@ fun SettingsScreen(active: Boolean = true) {
                     Row {
                         GlassButton(text = S.exportLogs, onClick = { logsExportLauncher.launch("lucent-startup-log.txt") })
                         Spacer(modifier = Modifier.width(12.dp))
-                        TextButton(onClick = {
+                        GlassButton(text = S.clearLogs, onClick = {
                             StartupLog.clear(context)
                             // Toast rather than the Data page's backupStatus line, which isn't
                             // shown on this page (task 5 moved these controls here).
                             LucentToast.show(context, S.logsClearedToast)
-                        }) { Text(S.clearLogs) }
+                        })
                     }
                 }
             }
@@ -2686,10 +2915,10 @@ fun SettingsScreen(active: Boolean = true) {
                     Row {
                         GlassButton(text = S.importBackup, onClick = { importLauncher.launch(arrayOf("*/*")) })
                         Spacer(modifier = Modifier.width(12.dp))
-                        TextButton(onClick = {
+                        GlassButton(text = S.actionDismiss, onClick = {
                             com.lucent.app.data.DatabaseEncryption.clearLockedNotice(context)
                             lockedDismissed = true
-                        }) { Text(S.actionDismiss) }
+                        })
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
@@ -2901,6 +3130,130 @@ private fun MemoryTierRow(
             Text(detail, color = onGradientMuted, fontSize = 12.sp)
         }
     }
+}
+
+/**
+ * One selectable section in the backup / restore dialogs (task 9).
+ *
+ * A plain labelled checkbox, with the whole row clickable rather than just the box. That is not
+ * politeness — these rows sit in a scrolling dialog on a phone, a checkbox is below the size anyone
+ * can hit reliably while a list is still settling, and a mis-tap here is the difference between
+ * backing up your API keys and not.
+ *
+ * The caller owns the set and is handed a new one, so the same component drives both dialogs without
+ * either sharing state with the other — an export selection must never leak into a restore, since
+ * the same words mean opposite things in the two directions.
+ */
+@Composable
+private fun BackupModuleRow(
+    label: String,
+    module: BackupManager.BackupModule,
+    selected: Set<BackupManager.BackupModule>,
+    onChange: (Set<BackupManager.BackupModule>) -> Unit,
+    subLabel: String? = null,
+    onChooseItems: (() -> Unit)? = null
+) {
+    val checked = module in selected
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .weight(1f)
+                .clickable { onChange(if (checked) selected - module else selected + module) }
+        ) {
+            Checkbox(
+                checked = checked,
+                // Null, not a duplicate handler: the row above already owns the toggle, and letting
+                // the box handle its own tap as well is how a fast double-tap cancels itself.
+                onCheckedChange = null
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(label, fontSize = 14.sp)
+                // Only shown for a partial selection, and it is the reason the second level is
+                // safe to offer at all: a backup missing most of your notes must say so on the
+                // screen where you press Export, not only inside a sub-menu you may never reopen.
+                if (subLabel != null) Text(subLabel, fontSize = 11.sp)
+            }
+        }
+        // The drill-in is a separate hit target from the tick, because they do opposite things:
+        // one decides whether this section travels at all, the other decides what is in it.
+        // Offered only while the module is actually ticked — choosing which notes to include in a
+        // section you have just excluded is a menu that cannot mean anything.
+        if (onChooseItems != null && checked) {
+            TextButton(onClick = onChooseItems) { Text(S.backupChooseItems, fontSize = 13.sp) }
+        }
+    }
+}
+
+/** Which list the second-level backup picker is showing. */
+private enum class ExportItemKind { NOTES, TASKS }
+
+/**
+ * The second-level picker: every note (or task), each with a tick, plus all/none shortcuts.
+ *
+ * Deliberately a flat list of titles and nothing else. This is a dialog for answering "is this one
+ * in or out", and previews, dates or tags would make each row taller without making that question
+ * easier — on a list of two hundred notes, height is the scarce resource. Titles are shown exactly
+ * as stored, with the same "(untitled)" fallback the rest of the app uses, so an item is never
+ * represented by a blank row that cannot be identified or reasoned about.
+ */
+@Composable
+private fun ExportItemPickerDialog(
+    title: String,
+    items: List<Pair<Long, String>>,
+    selected: Set<Long>,
+    onDone: (Set<Long>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var draft by remember(items) { mutableStateOf(selected) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Row {
+                    TextButton(onClick = { draft = items.map { it.first }.toSet() }) {
+                        Text(S.selectAll, fontSize = 13.sp)
+                    }
+                    TextButton(onClick = { draft = emptySet() }) {
+                        Text(S.clearAllSelection, fontSize = 13.sp)
+                    }
+                }
+                Text(S.backupNOfM(draft.size, items.size), fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(8.dp))
+                if (items.isEmpty()) {
+                    Text(S.backupNothingToPick, fontSize = 13.sp)
+                } else {
+                    // Lazy, not a scrolled Column: a database with a few hundred notes would
+                    // otherwise compose every row up front to open a dialog.
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(items, key = { it.first }) { (id, label) ->
+                            val checked = id in draft
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { draft = if (checked) draft - id else draft + id }
+                                    .padding(vertical = 2.dp)
+                            ) {
+                                Checkbox(checked = checked, onCheckedChange = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(label, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDone(draft) }) { Text(S.actionDone) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(S.actionCancel) } }
+    )
 }
 
 /**

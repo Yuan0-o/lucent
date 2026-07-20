@@ -626,22 +626,11 @@ fun AssistantScreen(active: Boolean = true) {
         )
     }
 
-    // Function-call confirmation (issue 13): the assistant has paused before changing the user's
-    // notes/tasks and is waiting on this decision. Approving runs the action; dismissing declines it,
-    // and the assistant is told so.
-    pendingConfirmation?.let { confirm ->
-        AlertDialog(
-            onDismissRequest = { AssistantController.resolveConfirmation(false) },
-            title = { Text(confirm.actionTitle) },
-            text = { Text(confirm.details) },
-            confirmButton = {
-                TextButton(onClick = { AssistantController.resolveConfirmation(true) }) { Text(com.lucent.app.i18n.S.actionConfirm) }
-            },
-            dismissButton = {
-                TextButton(onClick = { AssistantController.resolveConfirmation(false) }) { Text(com.lucent.app.i18n.S.actionCancel) }
-            }
-        )
-    }
+    // The function-call confirmation modal is NOT declared here any more (task 3). It is hosted by
+    // LucentApp so it can appear on any tab, because generation outlives this screen — see the
+    // documentation on [AssistantConfirmationDialog] for what went wrong when it lived here.
+    // `pendingConfirmation` is still read above: it suppresses the thinking bubble while a decision
+    // is outstanding, which is this screen's own business.
 
     // Network-error modal (issue 19): a genuine connectivity failure or timeout, surfaced clearly
     // rather than as a quiet inline line.

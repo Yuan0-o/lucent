@@ -95,8 +95,28 @@ object AssistantController {
     var pendingConfirmation by mutableStateOf<PendingConfirmation?>(null)
         private set
 
-    /** A pending function-call confirmation: a short header and a one-line summary of what will happen. */
-    data class PendingConfirmation(val actionTitle: String, val details: String)
+    /**
+     * A pending function-call confirmation: a short header, a one-line summary of what will happen,
+     * and — when the call has one — the single argument the user may correct before approving.
+     *
+     * [editKey] null means the action is a plain yes/no (a delete, a pin, a completion). When it is
+     * non-null the modal shows a text field pre-filled with [editValue]; approving with a changed
+     * value rewrites that argument and runs the corrected call. See [AppTools.editableArgument].
+     */
+    data class PendingConfirmation(
+        val actionTitle: String,
+        val details: String,
+        val toolName: String,
+        val editKey: String? = null,
+        val editLabel: String = "",
+        val editValue: String = ""
+    )
+
+    /** The user's answer to a confirmation, plus their edit of the offered field when they made one. */
+    private data class ConfirmationOutcome(val approved: Boolean, val editedValue: String? = null)
+
+    /** A confirmation that has been answered: the decision, and the arguments to actually run. */
+    private data class ConfirmedCall(val approved: Boolean, val argumentsJson: String)
 
     var messages by mutableStateOf<List<ChatMessage>>(emptyList())
         private set
@@ -113,7 +133,7 @@ object AssistantController {
     private var appContextRef: Context? = null
 
     // The confirm modal's answer is delivered back into the parked coroutine through this.
-    private var confirmationDeferred: CompletableDeferred<Boolean>? = null
+    private var confirmationDeferred: CompletableDeferred<ConfirmationOutcome>? = null
 
     // The conversation currently shown/active. Null until resolved on first load (we pick the
     // most-recent conversation, or lazily create one when the first message is sent). Everything
@@ -173,6 +193,10 @@ object AssistantController {
      * screen would keep observing a conversation id that no longer exists.
      */
     fun onAllChatsCleared(appContext: Context) {
+        // Every row has just been deleted, so an in-flight reply would insert itself into a table
+        // that was emptied a moment ago — a message reappearing in a history the user just cleared.
+        // Stop it silently and land on the fresh greeting (task 4).
+        if (sending) stopGeneration(silent = true)
         val db = AppDatabase.getInstance(appContext.applicationContext)
         currentConversationId = null
         errorText = ""
@@ -217,7 +241,11 @@ object AssistantController {
      * (issue 12). No-op while a reply is streaming, so we never split a turn.
      */
     fun startNewConversation(appContext: Context) {
-        if (sending) return
+        // A reply still in flight is interrupted rather than blocking the new chat (task 4). The old
+        // `if (sending) return` made the + button silently do nothing while the assistant was busy,
+        // which is indistinguishable from the button being broken — and it was most likely to be
+        // pressed precisely when a reply was dragging on and the user wanted out of it.
+        if (sending) stopGeneration(silent = true)
         val db = AppDatabase.getInstance(appContext.applicationContext)
         currentConversationId = null
         errorText = ""
@@ -244,7 +272,10 @@ object AssistantController {
      * deleting the chat you were reading dropped you into an unrelated old one.
      */
     fun deleteConversation(appContext: Context, id: Long) {
-        if (sending) return
+        // Interrupt first (task 4): a reply generating into a conversation that is about to be
+        // deleted has nowhere to land, and blocking the delete until it finished meant the one
+        // action that ends a runaway reply was disabled by the runaway reply.
+        if (sending) stopGeneration(silent = true)
         val db = AppDatabase.getInstance(appContext.applicationContext)
         // Clear any shown error at once so it disappears together with the deleted chat, rather
         // than lingering until the user leaves and re-enters the page (issue 14).
@@ -284,9 +315,9 @@ object AssistantController {
      * coroutine, which then either runs the tool (approved) or reports the refusal to the model
      * (denied) so it knows the action did not happen.
      */
-    fun resolveConfirmation(approved: Boolean) {
+    fun resolveConfirmation(approved: Boolean, editedValue: String? = null) {
         pendingConfirmation = null
-        confirmationDeferred?.complete(approved)
+        confirmationDeferred?.complete(ConfirmationOutcome(approved, editedValue))
         confirmationDeferred = null
     }
 
@@ -300,10 +331,10 @@ object AssistantController {
      * [reason] is the line appended to the saved turn so the conversation says what happened; when
      * null it falls back to the plain "Reply stopped." marker.
      */
-    fun stopGeneration(reason: String? = null) {
+    fun stopGeneration(reason: String? = null, silent: Boolean = false) {
         if (!sending) return
         // Unblock a parked confirmation first so the coroutine can unwind cleanly.
-        confirmationDeferred?.complete(false)
+        confirmationDeferred?.complete(ConfirmationOutcome(approved = false))
         confirmationDeferred = null
         pendingConfirmation = null
 
@@ -337,6 +368,15 @@ object AssistantController {
         // So there is now always a turn, and it always says so in words. `reason` carries the
         // specific cause when there is one worth naming — being backgrounded, in particular, needs
         // to point at the setting that would have prevented it.
+        // A SILENT stop leaves nothing behind (task 4). The three callers that ask for one are all
+        // about to make the conversation itself disappear — starting a new chat, deleting this one,
+        // wiping every chat — so a "Reply stopped." marker would either be written into a row that
+        // is deleted a millisecond later, or, worse, land in the fresh empty conversation the user
+        // was trying to get to. Nothing to explain, so nothing is said.
+        if (silent) {
+            turnPersisted = true
+            return
+        }
         val marker = reason ?: com.lucent.app.i18n.S.replyStopped
         if (!turnPersisted && convId != null && ctx != null) {
             turnPersisted = true
@@ -518,6 +558,10 @@ object AssistantController {
                 // action can never execute twice within one user turn (issue 12).
                 val executed = HashMap<String, ToolExecResult>()
 
+                // Set when the user declines a confirmation. A refusal ends the turn immediately
+                // (task 2) — see the comment at the break below for why the loop must not continue.
+                var declinedDetails: String? = null
+
                 var round = 0
                 while (round < MAX_TOOL_ROUNDS) {
                     thinking = true
@@ -555,25 +599,40 @@ object AssistantController {
                             continue
                         }
 
-                        val approved = if (AppTools.isMutating(call.name)) {
+                        val confirmed = if (AppTools.isMutating(call.name)) {
                             confirmToolCall(call.name, call.argumentsJson)
-                        } else true
+                        } else ConfirmedCall(approved = true, argumentsJson = call.argumentsJson)
 
-                        val r = if (!approved) {
-                            ToolExecResult(
-                                "The user was shown a confirmation for this action and DECLINED it, so it was NOT performed. Don't attempt it again; briefly acknowledge you won't do it and ask what they'd like instead.",
-                                success = false
-                            )
-                        } else {
-                            thinking = true
-                            AppTools.execute(
-                                appContext, db, call.name, call.argumentsJson,
-                                attachmentMime, attachmentData, attachmentName
-                            )
+                        if (!confirmed.approved) {
+                            // The user said no. END THE TURN — do not feed the refusal back and let
+                            // the model have another go (task 2).
+                            //
+                            // Telling the model "the user declined, don't retry" and continuing was
+                            // the reasonable-looking version of this, and it did not work. Models
+                            // frequently re-propose the same call anyway; the per-turn dedup then
+                            // returns the cached refusal WITHOUT re-showing a modal, so the loop
+                            // spends its remaining rounds silently arguing with itself while the
+                            // user watches a thinking indicator that has nothing behind it. On the
+                            // on-device path, where a round is tens of seconds, that reads as a
+                            // hang — and it is the "assistant stuck thinking forever" report.
+                            //
+                            // A refusal is also simply not a situation that needs a model. The user
+                            // has said what they want; the only correct reply is to confirm nothing
+                            // happened, and that sentence can be written here, instantly, in their
+                            // own language, without another round trip.
+                            declinedDetails = AppTools.describeToolCall(call.name, call.argumentsJson)
+                            break
                         }
+
+                        thinking = true
+                        val r = AppTools.execute(
+                            appContext, db, call.name, confirmed.argumentsJson,
+                            attachmentMime, attachmentData, attachmentName
+                        )
                         executed[sig] = r
                         results.add(r)
                     }
+                    if (declinedDetails != null) break
 
                     val toolImages = mutableListOf<ToolImage>()
                     for (r in results) toolImages.addAll(r.images)
@@ -622,7 +681,16 @@ object AssistantController {
                     round++
                 }
 
-                if (!errored) {
+                if (declinedDetails != null) {
+                    // A fixed, honest reply written here rather than asked for — see the break above.
+                    val content = com.lucent.app.i18n.S.assistantDeclinedReply(declinedDetails)
+                    thinking = false
+                    resetStream(reveal = true)
+                    finishTyping(content)
+                    insertAssistant(db, conversationId, content, null, null, TokenEstimator.estimate(content))
+                    turnPersisted = true
+                    if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+                } else if (!errored) {
                     if (finalReply == null) {
                         // Model kept calling tools past the cap — ask once more with tools OFF so
                         // it has to produce a written reply now.
@@ -813,17 +881,30 @@ object AssistantController {
             resetStream(reveal = false)
 
             val sig = signatureOf(call.name, call.argsJson)
-            val result = executed[sig] ?: run {
-                val approved = if (AppTools.isMutating(call.name)) confirmToolCall(call.name, call.argsJson) else true
-                val r = if (!approved) {
-                    ToolExecResult(
-                        "The user was shown a confirmation for this action and DECLINED it, so it was NOT performed. Don't attempt it again; briefly acknowledge you won't do it and ask what they'd like instead.",
-                        success = false
+            val cached = executed[sig]
+            val result = if (cached != null) cached else {
+                val confirmed = if (AppTools.isMutating(call.name)) {
+                    confirmToolCall(call.name, call.argsJson)
+                } else ConfirmedCall(approved = true, argumentsJson = call.argsJson)
+
+                if (!confirmed.approved) {
+                    // Same as the cloud path, and it matters more here: one extra local round costs
+                    // tens of seconds of on-device decoding, so continuing after a refusal is what
+                    // turned "no" into a minutes-long hang. Reply now and stop (task 2).
+                    val content = com.lucent.app.i18n.S.assistantDeclinedReply(
+                        AppTools.describeToolCall(call.name, call.argsJson)
                     )
-                } else {
-                    thinking = true
-                    AppTools.execute(ctx, db, call.name, call.argsJson)
+                    thinking = false
+                    resetStream(reveal = true)
+                    finishTyping(content)
+                    insertAssistant(db, conversationId, content, null, null, TokenEstimator.estimate(content))
+                    turnPersisted = true
+                    if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+                    return
                 }
+
+                thinking = true
+                val r = AppTools.execute(ctx, db, call.name, confirmed.argumentsJson)
                 executed[sig] = r
                 r
             }
@@ -877,7 +958,33 @@ object AssistantController {
                 "system" to (
                     "You are a helpful assistant living inside Lucent, a personal notes and tasks app. " +
                     "Always reply in the same language the user writes in. Be concise, warm, and clear. " +
-                    "Write plain conversational text only — never markdown, asterisks, bullet points, or headings."
+                    "Write plain conversational text only — never markdown, asterisks, bullet points, or headings.\n\n" +
+                    // ---- Capability honesty (task 6) ----
+                    //
+                    // This paragraph is the entire fix for "the assistant says it created the task
+                    // and nothing happened". Tools are OFF on this path, and the prompt used to be
+                    // silent about it — so the model, which has no way to observe its own tool
+                    // access, answered the only way a helpful assistant can when asked to do
+                    // something: it said it had done it. The lie was not the model being careless,
+                    // it was the model being uninformed, and the cure is to inform it.
+                    //
+                    // Stated as a hard capability limit rather than a style preference, because a
+                    // soft phrasing ("you may not be able to…") leaves room for the model to decide
+                    // it probably can.
+                    "IMPORTANT — WHAT YOU CANNOT DO RIGHT NOW. You have NO tools and NO ability to " +
+                    "change anything in this app in this conversation. You cannot create, read, " +
+                    "edit, complete, or delete notes or tasks, you cannot attach files, and you " +
+                    "cannot see the user's existing notes or tasks at all. You also have NO internet " +
+                    "access, so you cannot look anything up or fetch anything current.\n\n" +
+                    "Because of that, you must NEVER say or imply that you have created, added, " +
+                    "saved, changed, completed, deleted, or found anything. Never say \"done\", " +
+                    "\"added it\", \"I've made that note\", or anything of that shape. That would be " +
+                    "false, and the user would go looking for something that does not exist.\n\n" +
+                    "If they ask you to create or change a note or task, say plainly that you cannot " +
+                    "do it in this mode, and that they can switch it on in Settings > Assistant > " +
+                    "Local model > Allow tools, or add the item themselves on the Notes or Tasks " +
+                    "tab. You can still help fully in words — draft the wording, think it through, " +
+                    "talk it over — and offering that is far more useful than an apology."
                 )
             )
             addAll(turns)
@@ -936,6 +1043,18 @@ object AssistantController {
             append("Then either call another tool the same way, or — once the task is done — write your final answer ")
             append("to the user in their language as plain text (no JSON). ")
             append("If the user is only chatting and no action is needed, just answer directly with no tool.\n\n")
+            // ---- Capability honesty (task 6) ----
+            //
+            // Tools are on here, but only these tools. The model must not extrapolate from "I can
+            // call functions" to "I can do anything the app can do" — in particular it has no
+            // network in local mode, by design, and an offline model inventing a web lookup is the
+            // same class of failure as a tool-less model inventing a task.
+            append("The tools listed below are the ONLY actions available to you. If something is " +
+                "not in that list you cannot do it, and you must say so rather than claiming you " +
+                "did it. In particular you have NO internet access in this mode: you cannot search " +
+                "the web, open links, or fetch anything current, so never present a guess as a " +
+                "looked-up fact. Only report an action as done after its \"Result of <tool>:\" line " +
+                "confirms it worked; if a result says it failed, tell the user it failed.\n\n")
             append("Tools:\n")
             for (t in tools) {
                 val params = t.params.joinToString(", ") { p -> p.name + if (p.required) "*" else "" }
@@ -1083,13 +1202,30 @@ object AssistantController {
      * returning the user's decision. While it's parked the "thinking" bubble is hidden and the
      * confirm modal is shown; [resolveConfirmation] or [stopGeneration] completes the wait.
      */
-    private suspend fun confirmToolCall(name: String, argsJson: String): Boolean {
-        val deferred = CompletableDeferred<Boolean>()
+    private suspend fun confirmToolCall(name: String, argsJson: String): ConfirmedCall {
+        val deferred = CompletableDeferred<ConfirmationOutcome>()
         confirmationDeferred = deferred
         thinking = false
-        pendingConfirmation = PendingConfirmation(confirmTitleFor(name), AppTools.describeToolCall(name, argsJson))
+        val editable = AppTools.editableArgument(name, argsJson)
+        pendingConfirmation = PendingConfirmation(
+            actionTitle = confirmTitleFor(name),
+            details = AppTools.describeToolCall(name, argsJson),
+            toolName = name,
+            editKey = editable?.key,
+            editLabel = editable?.label.orEmpty(),
+            editValue = editable?.value.orEmpty()
+        )
         return try {
-            deferred.await()
+            val outcome = deferred.await()
+            // An edit only counts when the user actually changed something to something non-blank.
+            // Blanking the field is treated as "leave it alone" rather than as a request to create
+            // a nameless item, which is the one edit that could not possibly be what they meant.
+            val edited = outcome.editedValue?.trim()
+            val finalArgs =
+                if (outcome.approved && editable != null && !edited.isNullOrBlank() && edited != editable.value) {
+                    AppTools.withArgument(argsJson, editable.key, edited)
+                } else argsJson
+            ConfirmedCall(outcome.approved, finalArgs)
         } finally {
             pendingConfirmation = null
         }
@@ -1553,10 +1689,18 @@ object AssistantController {
                 append("useful. Don't search for things you already know reliably, or for the person's own ")
                 append("notes and tasks (search those with search_items instead). ")
             } else {
-                append("You do not have web access in this conversation. If the person needs live or very ")
-                append("recent information you can't be sure of, say so honestly and mention they can turn on ")
-                append("Web search in Settings, rather than guessing. ")
+                append("You do NOT have web access in this conversation — the web_search tool is not ")
+                append("available to you, and you cannot open links or fetch anything current. If the ")
+                append("person needs live or recent information, say so honestly and mention they can ")
+                append("turn on Web search in Settings > Assistant > Network, rather than guessing or ")
+                append("presenting something you half-remember as if you had just looked it up. ")
             }
+
+            // ---- The tool list is the whole of what you can do (task 6) ----
+            append("The tools you have been given are the COMPLETE set of actions available to you. ")
+            append("Anything not in that list, you cannot do — and the correct response is to say so, ")
+            append("never to describe it as done. Never report a change to the person's notes or tasks ")
+            append("that you did not actually make through a tool whose result confirmed success. ")
 
             // ---- Memory scope for this turn (issue 9) ----
             when (tier) {

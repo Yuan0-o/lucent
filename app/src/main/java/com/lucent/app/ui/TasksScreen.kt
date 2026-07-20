@@ -10,14 +10,21 @@ import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,8 +36,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -49,8 +56,8 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -68,24 +75,26 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lucent.app.AppNavigation
 import com.lucent.app.AppScope
 import com.lucent.app.Screen
@@ -107,10 +116,10 @@ import com.lucent.app.reminders.Notifications
 import com.lucent.app.reminders.ReminderScheduler
 import com.lucent.app.tools.TaskActions
 import dev.chrisbanes.haze.hazeSource
+import java.util.Calendar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Calendar
 
 @Composable
 fun TasksScreen(active: Boolean = true) {
@@ -815,40 +824,112 @@ fun TasksScreen(active: Boolean = true) {
             // anywhere on the page rather than only over the body (task 7). The top band (back / title
             // / action header) and the bottom band are excluded: a drag is only armed when it *starts*
             // in the central band. The inner Column keeps owning vertical scrolling.
+            // ---- Animated page-to-page swipe (task 7) ----
+            //
+            // The gesture already worked; what it lacked was any sense of movement. A drag past the
+            // threshold simply swapped the content, so the next task appeared fully formed with no
+            // indication that anything had travelled — indistinguishable, from the user's side, from
+            // the page having been redrawn for some unrelated reason. Direction is the whole meaning
+            // of a horizontal swipe, and the old version showed none of it.
+            //
+            // So the page now follows the finger and completes the journey on release:
+            //
+            //  - **While dragging**, the content tracks the finger 1:1 and fades slightly as it goes,
+            //    so the gesture is reversible — let go early and it springs back, which is the only
+            //    way a user can discover the threshold without being punished for finding it.
+            //  - **At the ends of the list** the drag is damped to a third (RESIST) instead of being
+            //    ignored. A dead gesture reads as a broken one; a stiff one reads as a wall, which is
+            //    what it actually is.
+            //  - **On release past the threshold** the outgoing page finishes its exit in the
+            //    direction of travel, then the incoming page enters from the opposite edge. Exit is
+            //    faster than entry (accelerating out, decelerating in) — the standard asymmetry that
+            //    makes the pair read as one continuous movement rather than two separate slides.
+            //
+            // [swipeOffset] is deliberately remembered WITHOUT a key on the task id: it has to
+            // survive the content swap in the middle of the animation, because the exit and the entry
+            // are two halves of one gesture, not two animations.
             val swipeList = sortedActive
+            val swipeOffset = remember { Animatable(0f) }
+            var pageWidth by remember { mutableFloatStateOf(0f) }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .onSizeChanged { pageWidth = it.width.toFloat() }
                     .pointerInput(task.id, swipeList) {
-                        var totalDrag = 0f
                         var armed = false
+                        var atEnd = false
                         val threshold = 72.dp.toPx()
                         val topExclusion = 88.dp.toPx()
                         val bottomExclusion = 88.dp.toPx()
                         detectHorizontalDragGestures(
                             onDragStart = { start ->
-                                totalDrag = 0f
                                 armed = start.y >= topExclusion && start.y <= size.height - bottomExclusion
+                                atEnd = false
                             },
                             onDragEnd = {
                                 if (armed) {
                                     val idx = swipeList.indexOfFirst { it.id == task.id }
-                                    if (idx >= 0) {
-                                        if (totalDrag <= -threshold && idx < swipeList.lastIndex) {
-                                            openDetail(swipeList[idx + 1])
-                                        } else if (totalDrag >= threshold && idx > 0) {
-                                            openDetail(swipeList[idx - 1])
+                                    val travelled = swipeOffset.value
+                                    val goNext = travelled <= -threshold && idx >= 0 && idx < swipeList.lastIndex
+                                    val goPrev = travelled >= threshold && idx > 0
+                                    val width = if (pageWidth > 0f) pageWidth else threshold * 6f
+                                    scope.launch {
+                                        when {
+                                            goNext -> {
+                                                swipeOffset.animateTo(-width, tween(SWIPE_EXIT_MS, easing = FastOutLinearInEasing))
+                                                openDetail(swipeList[idx + 1])
+                                                swipeOffset.snapTo(width)
+                                                swipeOffset.animateTo(0f, tween(SWIPE_ENTER_MS, easing = LinearOutSlowInEasing))
+                                            }
+                                            goPrev -> {
+                                                swipeOffset.animateTo(width, tween(SWIPE_EXIT_MS, easing = FastOutLinearInEasing))
+                                                openDetail(swipeList[idx - 1])
+                                                swipeOffset.snapTo(-width)
+                                                swipeOffset.animateTo(0f, tween(SWIPE_ENTER_MS, easing = LinearOutSlowInEasing))
+                                            }
+                                            // Not far enough, or nothing to move to: spring home.
+                                            else -> swipeOffset.animateTo(
+                                                0f,
+                                                spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            )
                                         }
                                     }
                                 }
+                                armed = false
                             },
-                            onHorizontalDrag = { _, dragAmount -> if (armed) totalDrag += dragAmount }
+                            onDragCancel = {
+                                armed = false
+                                scope.launch { swipeOffset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                if (armed) {
+                                    val idx = swipeList.indexOfFirst { it.id == task.id }
+                                    // Damp the drag when there is nothing in that direction to reach,
+                                    // so the end of the list feels like a wall rather than a fault.
+                                    val blocked = idx < 0 ||
+                                        (dragAmount < 0 && idx >= swipeList.lastIndex) ||
+                                        (dragAmount > 0 && idx <= 0)
+                                    atEnd = blocked
+                                    change.consume()
+                                    scope.launch {
+                                        swipeOffset.snapTo(swipeOffset.value + if (blocked) dragAmount * SWIPE_RESIST else dragAmount)
+                                    }
+                                }
+                            }
                         )
                     }
             ) {
               Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = swipeOffset.value
+                        // A gentle fade tied to how far the page has travelled. It never reaches
+                        // fully transparent during a drag — a page you can still see is a page you
+                        // can still change your mind about.
+                        alpha = 1f - (kotlin.math.abs(swipeOffset.value) / (pageWidth.takeIf { it > 0f } ?: 1f))
+                            .coerceIn(0f, 1f) * 0.35f
+                    }
                     .padding(16.dp)
                     .verticalScroll(rememberScrollState())
                     .padding(bottom = LocalBottomBarInset.current)
@@ -913,7 +994,17 @@ fun TasksScreen(active: Boolean = true) {
                     }
                 }
 
-                Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                // Long-press anywhere on this card to copy the task's content (task 1). Same
+                // reasoning as the note detail page: the whole card is the target so a press that
+                // lands in the padding still counts, and the SelectionContainer inside still wins
+                // long-press over the title/date block for native text selection.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .longPressCopy(context, copyTextForTask(task))
+                        .frostedGlass()
+                        .padding(16.dp)
+                ) {
                     // No checkbox here any more (task 6). A tick-box on the detail page was a second
                     // control for something the header now owns, and — because the page is *read*
                     // rather than scanned — it was the one most likely to be hit by accident while
@@ -1371,6 +1462,30 @@ private fun shareTextForTask(task: Task): String {
     val items = Checklist.parse(task.subtasks)
     if (items.isNotEmpty()) {
         sb.append("\n\nSubtasks:\n").append(Checklist.toMarkdown(task.subtasks))
+    }
+    return sb.toString().trim()
+}
+
+/**
+ * What a long-press on the detail page copies: the task's CONTENT and nothing else.
+ *
+ * Deliberately not [shareTextForTask]. Sharing describes a task to someone else, so it leads with
+ * the title and carries the due date, priority and repeat rule as context. Copying is a step in
+ * moving text into something you are already writing, and there the title, the created/due dates
+ * and the badges are precisely what you would have to strip out by hand at the other end.
+ *
+ * So this is the description text, plus the subtask list when there is one — the two parts of a
+ * task that are actually *written* rather than *set*. A task with neither copies as an empty
+ * string, and [longPressCopy] no-ops on blank text rather than showing a "copied" toast for
+ * nothing.
+ */
+private fun copyTextForTask(task: Task): String {
+    val sb = StringBuilder()
+    if (task.notes.isNotBlank()) sb.append(task.notes.trim())
+    val items = Checklist.parse(task.subtasks)
+    if (items.isNotEmpty()) {
+        if (sb.isNotEmpty()) sb.append("\n\n")
+        sb.append(Checklist.toMarkdown(task.subtasks).trim())
     }
     return sb.toString().trim()
 }
