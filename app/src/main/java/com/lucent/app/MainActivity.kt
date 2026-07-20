@@ -81,6 +81,7 @@ import com.lucent.app.reminders.ReminderScheduler
 import com.lucent.app.ui.AndroidRobotIcon
 import com.lucent.app.ui.AppReady
 import com.lucent.app.ui.AppLockController
+import com.lucent.app.ui.AssistantConfirmationDialog
 import com.lucent.app.ui.AssistantController
 import com.lucent.app.ui.AssistantScreen
 import com.lucent.app.ui.FluidGlassBackground
@@ -619,6 +620,12 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
             }
         )
     }
+
+    // The assistant's tool-confirmation modal, hosted here rather than on the Assistant screen so it
+    // can appear on ANY tab (task 3). A reply keeps generating while the user browses their notes, so
+    // the question it needs answered has to be askable wherever they happen to be standing; hosted on
+    // the Assistant screen it simply never appeared, and the turn waited for an answer forever.
+    AssistantConfirmationDialog()
 
     CompositionLocalProvider(LocalHazeState provides hazeState) {
         Box(modifier = Modifier.fillMaxSize()) {
