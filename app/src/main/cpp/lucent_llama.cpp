@@ -262,7 +262,16 @@ Java_com_lucent_app_local_LocalLlm_nativeGenerate(JNIEnv * env, jobject, jlong h
     jclass cbClass = env->GetObjectClass(callback);
     jmethodID onPiece = env->GetMethodID(cbClass, "onPiece", "(Ljava/lang/String;)V");
     env->DeleteLocalRef(cbClass);
-    if (!onPiece) { s->busy.store(false); return -2; }
+    if (!onPiece) {
+        // A failed lookup leaves a pending NoSuchMethodError in the env; clear it so this reports
+        // the deterministic -2 instead of throwing back into Kotlin as a raw error (-20). Seen when
+        // R8 renames the callback in a minified build — the keep rules in proguard-rules.pro prevent
+        // that, and this keeps the failure mode diagnosable if the rules are ever lost again.
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGE("generate: callback has no onPiece(String) — check the LocalLlm proguard keep rules");
+        s->busy.store(false);
+        return -2;
+    }
 
     int rc = 0;
     try {
@@ -350,6 +359,11 @@ Java_com_lucent_app_local_LocalLlm_nativeGenerate(JNIEnv * env, jobject, jlong h
         }
         llama_batch_free(batch);
 
+        // Stop takes precedence over the zero-tokens check: a Stop pressed while the prompt is
+        // still prefilling (common — prefill takes seconds on big prompts) leaves produced == 0
+        // with the stop flag set, and that is a QUIET user stop (rc 1), not an engine error. The
+        // old order turned exactly that case into a spurious "-7 generate failed" banner.
+        if (s->stop.load() && rc == 0) rc = 1;
         if (rc == 0 && produced == 0) {
             // Loaded and decoded cleanly, but the model emitted end-of-turn before any content —
             // almost always a chat-template mismatch for this specific model rather than an engine
@@ -357,7 +371,6 @@ Java_com_lucent_app_local_LocalLlm_nativeGenerate(JNIEnv * env, jobject, jlong h
             LOGE("generate produced 0 tokens (immediate EOG — check the chat template for this model)");
             rc = -7;
         }
-        if (s->stop.load() && rc == 0) rc = 1;
     } catch (...) {
         LOGE("exception during generate");
         rc = -6;
