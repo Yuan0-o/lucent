@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -662,7 +662,7 @@ fun TasksScreen(active: Boolean = true) {
     when {
         composing -> {
             // ---- Create / edit page ----
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).padding(bottom = LocalBottomBarInset.current)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { leaveComposer() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = com.lucent.app.i18n.S.actionBack, tint = onGradient)
@@ -775,20 +775,21 @@ fun TasksScreen(active: Boolean = true) {
                     Spacer(modifier = Modifier.height(12.dp))
                     PriorityPickerRow(selected = priority, onSelect = { priority = it })
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { filePicker.launch("*/*") },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = onGradientMuted)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(com.lucent.app.i18n.S.attachFile, color = onGradient, fontSize = 14.sp)
-                    }
-                    PendingAttachmentChips(pendingAttachments, onGradientMuted) { att ->
-                        pendingAttachments = Attachments.removeByName(context, pendingAttachments, att.name)
-                    }
+                    // Same labelled section as the note composer (task 13). Previously this was an
+                    // unlabelled icon+text row pressed directly against the priority chips above and
+                    // the Add button below, with the file chips landing flush against it — three
+                    // unrelated controls at one visual level, 8dp apart, and the optional one reading
+                    // as an afterthought stuck to the primary action.
+                    Spacer(modifier = Modifier.height(16.dp))
+                    AttachmentSection(
+                        attachments = pendingAttachments,
+                        onPick = { filePicker.launch("*/*") },
+                        onRemove = { att ->
+                            pendingAttachments = Attachments.removeByName(context, pendingAttachments, att.name)
+                        }
+                    )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(20.dp))
                     Button(onClick = { saveTask() }) {
                         Icon(Icons.Default.Add, contentDescription = null)
                         Text(if (editingTask != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addTaskBtn)
@@ -850,6 +851,7 @@ fun TasksScreen(active: Boolean = true) {
                     .fillMaxSize()
                     .padding(16.dp)
                     .verticalScroll(rememberScrollState())
+                    .padding(bottom = LocalBottomBarInset.current)
             ) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { closeDetail() }) {
@@ -1174,7 +1176,11 @@ fun TasksScreen(active: Boolean = true) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize().hazeSource(state = hazeState),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Reserve the floating capsule's height at the bottom so the last card can
+                    // scroll clear of the pill instead of ending up trapped behind it — the list
+                    // itself still extends under the capsule (that's what its blur samples).
+                    contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
                 ) {
                     if (sortedActive.isEmpty()) {
                         item(key = "empty_state") {

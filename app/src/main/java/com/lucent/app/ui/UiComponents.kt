@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -114,6 +115,131 @@ fun GlassCapsuleButton(
         Icon(icon, contentDescription = null, tint = onGradient)
         Spacer(modifier = Modifier.width(8.dp))
         Text(text, color = onGradient, fontSize = 16.sp)
+    }
+}
+
+/**
+ * The app's standard button, in the same glass as everything else (task 11).
+ *
+ * ### Why this exists
+ *
+ * Lucent draws one material — a translucent fill, a hairline gradient rim, no shadow — and every
+ * surface in it obeys that rule except the buttons on Settings > Data, which were still Material 3's
+ * `Button`. M3 draws a *filled, opaque* pill in the theme's primary colour, so the Data page ended
+ * up with six solid lilac slabs and four solid red ones sitting on top of a page made entirely of
+ * glass. Not ugly in isolation — it is a perfectly good button — but visibly borrowed, which is the
+ * one thing a design language cannot afford at its most consequential screen: the page where the
+ * buttons erase your notes should not be the page that looks like it came from somewhere else.
+ *
+ * So this is the same subtraction [GlassCapsuleButton] went through, generalized: fill, rim, label.
+ * No `Modifier.shadow` anywhere near it — a shadow creates a `graphicsLayer`, and one of those
+ * nested inside the `hazeSource` container that captures the background is what once painted a pale
+ * rectangle inside every card in the app.
+ *
+ * [danger] switches the tint to red for destructive actions, keeping the *material* identical while
+ * making the meaning unmistakable — the difference between "this is a button" and "this button
+ * deletes things" should be carried by colour, not by suddenly changing what buttons are made of.
+ *
+ * A disabled button fades rather than disappearing, and swallows its tap: callers that want a
+ * *reason* shown on tap (the greyed-out controls in local-model mode, task 8) keep [enabled] true
+ * and answer inside [onClick] with a bottom toast instead — a dead control that ignores touches
+ * teaches nothing.
+ */
+@Composable
+fun GlassButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    danger: Boolean = false
+) {
+    val onGradient = LocalOnGradient.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val shape = RoundedCornerShape(percent = 50)
+    val glassDark = isDarkGlass()
+
+    // Danger keeps the glass and changes only the hue: a red wash, a red rim, red text. The two
+    // alphas differ by theme for the same reason every other surface's do — a light wash reads on a
+    // dark backdrop and washes out on a light one.
+    val dangerHue = Color(0xFFE5484D)
+    val fill = when {
+        danger && glassDark -> dangerHue.copy(alpha = 0.22f)
+        danger -> dangerHue.copy(alpha = 0.16f)
+        glassDark -> Color.White.copy(alpha = LucentGlass.CARD_FILL_DARK)
+        else -> Color.White.copy(alpha = LucentGlass.CARD_FILL_LIGHT)
+    }
+    val border = if (danger) dangerHue.copy(alpha = if (glassDark) 0.55f else 0.45f) else Color.Transparent
+    val label = when {
+        danger && glassDark -> Color(0xFFFFB4AB)
+        danger -> Color(0xFF8C1D18)
+        else -> onGradient
+    }
+    val fade = if (enabled) 1f else 0.38f
+
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(fill.copy(alpha = fill.alpha * fade))
+            .then(
+                if (danger) Modifier.border(1.dp, border.copy(alpha = border.alpha * fade), shape)
+                else Modifier.border(1.dp, lucentGlassRim(strong = true), shape)
+            )
+            .clickable(enabled = enabled) {
+                Haptics.tick(context)
+                onClick()
+            }
+            .padding(horizontal = 22.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = label.copy(alpha = label.alpha * fade), modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(text, color = label.copy(alpha = label.alpha * fade), fontSize = 15.sp)
+    }
+}
+
+/**
+ * The attachment block shared by the note and task composers (task 13).
+ *
+ * ### What was cramped about it
+ *
+ * Both composers ended the form with a bare `Attach file` row wedged between the priority chips and
+ * the big Add button, with no heading, no separation, and — when files were attached — a stack of
+ * chips landing directly against the row above. Three unrelated things (choose a priority, attach a
+ * file, save) sat at the same visual level with 8dp between them, so the eye had nothing to group
+ * on and the one optional step in the form read as an afterthought glued to the primary action.
+ *
+ * The fix is not more padding, it is structure: a labelled section with a quiet one-line hint, the
+ * picker as a real glass button rather than a text row, and the attached files listed underneath it
+ * with room to breathe. It occupies slightly more height and is markedly easier to parse, which is
+ * the correct trade in a form the user is already scrolling.
+ */
+@Composable
+fun AttachmentSection(
+    attachments: List<com.lucent.app.data.Attachment>,
+    onPick: () -> Unit,
+    onRemove: (com.lucent.app.data.Attachment) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val onGradient = LocalOnGradient.current
+    val onGradientMuted = LocalOnGradientMuted.current
+    Column(modifier = modifier.fillMaxWidth().padding(top = 4.dp)) {
+        Text(com.lucent.app.i18n.S.attachmentsSectionTitle, color = onGradient, fontSize = 14.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(com.lucent.app.i18n.S.attachmentsSectionHint, color = onGradientMuted, fontSize = 12.sp)
+        Spacer(modifier = Modifier.height(10.dp))
+        GlassButton(
+            text = com.lucent.app.i18n.S.attachFile,
+            icon = Icons.Default.AttachFile,
+            onClick = onPick
+        )
+        if (attachments.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            PendingAttachmentChips(attachments, onGradientMuted, onRemove)
+        }
     }
 }
 

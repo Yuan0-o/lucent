@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -41,7 +42,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Lightbulb
-import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
@@ -400,6 +400,29 @@ fun NotesScreen(active: Boolean = true) {
         }
     }
 
+    /**
+     * Whether the composer holds any CONTENT a template would overwrite (task 12).
+     *
+     * This is a narrower question than [noteDirty], and conflating the two is what made pinning a
+     * new note hide the template row. [noteDirty] answers "would leaving here lose something?" — and
+     * for that, pinning and picking a colour absolutely count, because the user chose them and would
+     * not expect them to evaporate. But the template row was gated on the same flag, and it is
+     * answering a completely different question: "is there anything here a template would destroy?"
+     *
+     * [applyTemplate] writes exactly five things — title, body, tags, checklist mode, checklist items
+     * — and touches neither the pin nor the colour. So a pinned, purple, otherwise-empty new note is
+     * still a blank canvas as far as templates are concerned, and hiding them was protecting work
+     * that did not exist. Worse, it was silent: the row simply disappeared, with the pin toggle as
+     * the unexplained cause, which reads as a bug rather than a safeguard.
+     *
+     * The fields listed here are precisely the fields [applyTemplate] overwrites. If it ever learns
+     * to set another one, that field belongs in this expression too.
+     */
+    val noteContentDirty = composing && editingId == null && (
+        newTitle.isNotBlank() || newBody.isNotBlank() ||
+            selectedTags.isNotEmpty() || checklistItems.isNotEmpty()
+        )
+
     fun discardComposer() {
         composing = false
         resetComposer()
@@ -666,7 +689,7 @@ fun NotesScreen(active: Boolean = true) {
     when {
         composing -> {
             // ---- Create / edit page ----
-            Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).padding(bottom = LocalBottomBarInset.current)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { leaveComposer() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = com.lucent.app.i18n.S.actionBack, tint = onGradient)
@@ -675,10 +698,11 @@ fun NotesScreen(active: Boolean = true) {
                 }
 
                 Column(modifier = Modifier.fillMaxWidth().frostedGlass(tint = selectedColor.swatch).padding(16.dp)) {
-                    // Templates are offered only on a brand-new, still-untouched note. Showing them
-                    // while editing — or after the user has started typing — would turn a one-tap
-                    // convenience into a one-tap way to obliterate your own work.
-                    if (editingId == null && !noteDirty) {
+                    // Templates are offered only on a brand-new note whose CONTENT is still empty.
+                    // Showing them while editing an existing note — or after the user has started
+                    // typing — would turn a one-tap convenience into a one-tap way to obliterate your
+                    // own work. Pinning or colouring the note is not typing: see [noteContentDirty].
+                    if (editingId == null && !noteContentDirty) {
                         Text(com.lucent.app.i18n.S.startFromTemplate, color = onGradientMuted, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(6.dp))
                         FlowRow(
@@ -839,16 +863,18 @@ fun NotesScreen(active: Boolean = true) {
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { filePicker.launch("*/*") }) {
-                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = onGradient)
-                        Text(com.lucent.app.i18n.S.attachFileLeading, color = onGradient)
-                    }
-                    PendingAttachmentChips(pendingAttachments, onGradientMuted) { att ->
-                        pendingAttachments = Attachments.removeByName(context, pendingAttachments, att.name)
-                    }
+                    // Attachments get a labelled section of their own instead of a bare text button
+                    // wedged between the tag field and Save (task 13). See [AttachmentSection].
+                    Spacer(modifier = Modifier.height(16.dp))
+                    AttachmentSection(
+                        attachments = pendingAttachments,
+                        onPick = { filePicker.launch("*/*") },
+                        onRemove = { att ->
+                            pendingAttachments = Attachments.removeByName(context, pendingAttachments, att.name)
+                        }
+                    )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(20.dp))
                     Button(onClick = { saveNote() }) {
                         Icon(Icons.Default.Add, contentDescription = null)
                         Text(if (editingId != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addNoteBtn)
@@ -927,6 +953,7 @@ fun NotesScreen(active: Boolean = true) {
                     .fillMaxSize()
                     .padding(16.dp)
                     .verticalScroll(rememberScrollState())
+                    .padding(bottom = LocalBottomBarInset.current)
             ) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { closeDetail() }) {
@@ -1283,7 +1310,10 @@ fun NotesScreen(active: Boolean = true) {
                     columns = GridCells.Fixed(2),
                     modifier = Modifier.fillMaxSize().hazeSource(state = LocalHazeState.current),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Reserve the floating capsule's height so the last note clears the pill; the
+                    // grid still extends under the capsule, which is what its blur samples.
+                    contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
                 ) {
                     if (sortedNotes.isEmpty()) {
                         item(key = "empty_state", span = { GridItemSpan(maxLineSpan) }) {

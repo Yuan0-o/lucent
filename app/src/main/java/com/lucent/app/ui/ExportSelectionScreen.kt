@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -151,7 +152,10 @@ fun <T> ExportSelectionScreen(
             Text(com.lucent.app.i18n.S.nSelected(selectedIds.size), color = onGradientMuted, fontSize = 13.sp)
         }
 
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
+        ) {
             items(visible, key = { id(it) }) { item ->
                 val checked = id(item) in selectedIds
                 Row(

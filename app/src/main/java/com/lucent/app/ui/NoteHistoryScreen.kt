@@ -3,6 +3,7 @@ package com.lucent.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -118,7 +119,7 @@ fun NoteHistoryScreen(
     val preview = previewing
     if (preview != null) {
         // ---- Read-only preview of one old version ----
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        Column(modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).padding(bottom = LocalBottomBarInset.current)) {
             Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { previewing = null }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = com.lucent.app.i18n.S.actionBack, tint = onGradient)
@@ -194,7 +195,9 @@ fun NoteHistoryScreen(
 
         LazyColumn(
             modifier = Modifier.hazeSource(state = hazeState),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            // Reserve the floating capsule's height so the last row clears the pill.
+            contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
         ) {
             items(versions, key = { it.id }) { version ->
                 VersionCard(

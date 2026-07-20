@@ -2,6 +2,7 @@ package com.lucent.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -175,7 +176,9 @@ fun ArchivedNotesScreen(
                 // A single flat list; `filtered` is already archive-time ordered by the DAO query.
                 LazyColumn(
                     modifier = Modifier.hazeSource(state = hazeState),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Reserve the floating capsule's height so the last row clears the pill.
+                    contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
                 ) {
                     items(filtered, key = { it.id }) { note ->
                         ArchivedNoteCard(
@@ -196,7 +199,9 @@ fun ArchivedNotesScreen(
                 val groups = remember(filtered) { buildTagGroups(filtered) }
                 LazyColumn(
                     modifier = Modifier.hazeSource(state = hazeState),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Reserve the floating capsule's height so the last row clears the pill.
+                    contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
                 ) {
                     groups.forEach { (tag, notesForTag) ->
                         item(key = "header_$tag") {

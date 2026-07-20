@@ -291,11 +291,16 @@ object AssistantController {
     }
 
     /**
-     * Interrupt an in-progress reply (the Stop button, issue 14). Cancels the generation, unblocks
-     * any confirmation it was waiting on, and — so the thread isn't left with a dangling user message
-     * — saves whatever text had been produced so far, unless the normal path already saved a reply.
+     * Interrupt an in-progress reply. Cancels the generation, unblocks any confirmation it was
+     * waiting on, and — so the thread isn't left with a dangling user message — saves whatever text
+     * had been produced so far, unless the normal path already saved a reply.
+     *
+     * Called from three places now: the Stop button, the "stop and exit" choice in the exit warning,
+     * and the app going to the background with background replies switched off (task 2).
+     * [reason] is the line appended to the saved turn so the conversation says what happened; when
+     * null it falls back to the plain "Reply stopped." marker.
      */
-    fun stopGeneration() {
+    fun stopGeneration(reason: String? = null) {
         if (!sending) return
         // Unblock a parked confirmation first so the coroutine can unwind cleanly.
         confirmationDeferred?.complete(false)
@@ -320,14 +325,52 @@ object AssistantController {
         sending = false
         stopGenerationService()
 
-        if (!turnPersisted && convId != null && cleaned.isNotBlank() && ctx != null) {
+        // Write the stop into the conversation, always — including when not one token had been
+        // produced yet (task 2).
+        //
+        // The old version only saved something if `cleaned` was non-blank, and marked it with a
+        // trailing "…". Both were too quiet. Stopping during the model-loading pause left the thread
+        // holding a user message with no reply under it and a thinking bubble that had just vanished,
+        // which reads as the app losing the message rather than obeying the Stop button. And an
+        // ellipsis is not a status: it is indistinguishable from a reply that merely trailed off.
+        //
+        // So there is now always a turn, and it always says so in words. `reason` carries the
+        // specific cause when there is one worth naming — being backgrounded, in particular, needs
+        // to point at the setting that would have prevented it.
+        val marker = reason ?: com.lucent.app.i18n.S.replyStopped
+        if (!turnPersisted && convId != null && ctx != null) {
             turnPersisted = true
             val db = AppDatabase.getInstance(ctx)
-            val tokens = TokenEstimator.estimate(cleaned)
-            // The trailing ellipsis marks the reply as one the user cut short.
-            AppScope.io.launch { insertAssistant(db, convId, "$cleaned …", null, null, tokens) }
+            val body = if (cleaned.isBlank()) marker else "$cleaned\n\n$marker"
+            val tokens = TokenEstimator.estimate(body)
+            AppScope.io.launch { insertAssistant(db, convId, body, null, null, tokens) }
         }
     }
+
+    /**
+     * The app left the foreground (task 2).
+     *
+     * Default behaviour is to stop an in-flight LOCAL reply and free the model, because holding a
+     * multi-gigabyte model resident for a screen nobody is looking at is the single most expensive
+     * thing this app can do to a phone. [backgroundRepliesEnabled] is the user's opt-out — when they
+     * have turned background replies on, the reply is left alone to finish under the foreground
+     * service.
+     *
+     * Cloud replies are never touched: they cost nothing locally while they wait on the network, and
+     * cutting one off would waste a request the user has already paid for.
+     */
+    fun onAppBackgrounded(backgroundRepliesEnabled: Boolean) {
+        if (!sending || !localTurnInFlight || backgroundRepliesEnabled) return
+        stopGeneration(com.lucent.app.i18n.S.replyStoppedBackground)
+    }
+
+    /**
+     * Whether the reply currently being generated is running on the on-device model. Read by the
+     * lifecycle and exit paths, which have to treat local and cloud replies differently: only the
+     * local one is holding gigabytes of RAM and only it is stopped by leaving the app.
+     */
+    var localTurnInFlight: Boolean = false
+        private set
 
     // The full parameter set of the most recent send(), kept so the network-error modal can offer
     // a one-tap Retry (ported from the second assistant variant). By the time a connection failure
@@ -453,7 +496,10 @@ object AssistantController {
                 // is at its most fluent when it is fed a short, clean prompt rather than a tool
                 // protocol it will imitate badly.
                 if (useLocalModel) {
-                    runLocalTurn(db, conversationId, useLocalTools, useLocalGpu)
+                    // Flagged for the lifecycle paths: only a LOCAL turn is holding gigabytes of
+                    // RAM, and only a local turn is stopped by leaving the app (task 2).
+                    localTurnInFlight = true
+                    runLocalTurn(db, conversationId, useLocalTools, useLocalGpu, memoryTier)
                     return@launch // the shared finally below still resets sending/thinking state
                 }
 
@@ -623,6 +669,7 @@ object AssistantController {
                 thinking = false
                 loadingModel = false
                 sending = false
+                localTurnInFlight = false
                 pendingConfirmation = null
                 stopGenerationService()
             }
@@ -654,7 +701,19 @@ object AssistantController {
      * text with the app's usual " …" suffix, and reset state — so return code 1 simply ends the
      * turn quietly.
      */
-    private suspend fun runLocalTurn(db: AppDatabase, conversationId: Long, useTools: Boolean, useGpu: Boolean) {
+    private suspend fun runLocalTurn(
+        db: AppDatabase,
+        conversationId: Long,
+        useTools: Boolean,
+        useGpu: Boolean,
+        // The memory tier now reaches this path instead of being hard-coded to MEDIUM. In local mode
+        // Settings offers LOW and MEDIUM and withholds HIGH (task 8), so honouring the value here is
+        // what makes that choice mean anything: LOW sends just the latest message, MEDIUM sends the
+        // conversation tail. HIGH is clamped to MEDIUM as a belt-and-braces measure — a backup
+        // restored from a cloud-configured device could still carry it — because HIGH additionally
+        // folds in a cross-conversation digest that would blow past a small model's context window.
+        memoryTier: MemoryTier
+    ) {
         val ctx = appContextRef ?: return
 
         if (!com.lucent.app.local.LocalLlm.isSupported()) {
@@ -697,7 +756,7 @@ object AssistantController {
 
         // Tools are opt-in (default off, for phone performance — see the Settings toggle). With them
         // off this is a plain, fast chat that never spends a round on the tool protocol.
-        if (!useTools) { runLocalChatOnly(db, conversationId); return }
+        if (!useTools) { runLocalChatOnly(db, conversationId, memoryTier); return }
 
         // The in-app tools (create/read/update/… notes and tasks). Web search is left off on
         // purpose: local mode is meant to work with no network, and a small model drives the
@@ -709,7 +768,7 @@ object AssistantController {
         // The tail of this conversation, oldest→newest, as plain role/text pairs. Attachments are
         // text-invisible to a local text model, so only message text travels. The just-sent user
         // message is already in the table, so it arrives as the final pair entry.
-        val turns = buildHistory(db, conversationId, MemoryTier.MEDIUM)
+        val turns = buildHistory(db, conversationId, localTier(memoryTier))
             .filter { it.role == "user" || it.role == "assistant" }
             .map { it.role to it.content }
             .filter { it.second.isNotBlank() }
@@ -805,8 +864,8 @@ object AssistantController {
      * — no silent buffering, because with no tools there is never a tool-call JSON that could flash on
      * screen. This is the fast, low-overhead mode a weak phone gets unless the user opts tools in.
      */
-    private suspend fun runLocalChatOnly(db: AppDatabase, conversationId: Long) {
-        val turns = buildHistory(db, conversationId, MemoryTier.MEDIUM)
+    private suspend fun runLocalChatOnly(db: AppDatabase, conversationId: Long, memoryTier: MemoryTier) {
+        val turns = buildHistory(db, conversationId, localTier(memoryTier))
             .filter { it.role == "user" || it.role == "assistant" }
             .map { it.role to it.content }
             .filter { it.second.isNotBlank() }
@@ -967,6 +1026,14 @@ object AssistantController {
      *  - MEDIUM and HIGH send the whole current conversation. (HIGH's cross-conversation context is
      *    added separately, into the system prompt, by [crossConversationMemory].)
      */
+    /**
+     * The memory tier an on-device turn is allowed to use. HIGH becomes MEDIUM: the high tier's
+     * defining behaviour is attaching a digest of OTHER conversations, and a few-billion-parameter
+     * model with a small context window handles that by forgetting the actual question.
+     */
+    private fun localTier(tier: MemoryTier): MemoryTier =
+        if (tier == MemoryTier.HIGH) MemoryTier.MEDIUM else tier
+
     private suspend fun buildHistory(db: AppDatabase, conversationId: Long, tier: MemoryTier): List<ChatTurn> {
         val current = db.chatDao().getForConversationOnce(conversationId)
             .map { ChatTurn(it.role, it.content, it.attachmentMime, it.attachmentData) }

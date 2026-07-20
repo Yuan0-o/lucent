@@ -23,6 +23,28 @@ val LocalOnGradient = compositionLocalOf { Color.White }
 val LocalOnGradientMuted = compositionLocalOf { Color.White.copy(alpha = 0.65f) }
 
 /**
+ * How much space the floating bottom capsule (plus the gap it keeps above the system nav bar)
+ * occupies, published so every scrollable region can reserve exactly that much at its bottom.
+ *
+ * ### Why this exists (the "capsule floats over content" change)
+ *
+ * The bottom capsule used to sit in a *reserved strip*: the Scaffold inset all tab content by the
+ * bar's full height, so nothing was ever drawn behind the pill — it hovered over a band of blank
+ * background, which is what made it read as a docked bar rather than a floating piece of glass. The
+ * app content now extends to the very bottom edge and passes *under* the capsule, so the pill's
+ * blur samples real cards and text sliding beneath it (that is the whole point of the glass).
+ *
+ * The cost of that is nothing reserves the space any more, so a list's last row — or a form's last
+ * field, or the assistant's input bar — would end up *trapped behind* the pill. Each scrollable
+ * root reads this value and pads its own bottom by it (a list as `contentPadding`, a scrolled
+ * column as trailing padding, the chat column as bottom padding that lifts the input bar), so the
+ * last thing the user needs to reach always clears the capsule while everything above it still
+ * scrolls freely underneath. One source of truth, set once in [com.lucent.app.MainActivity] from
+ * the Scaffold's own measured bottom inset, so it can never drift from the pill's real height.
+ */
+val LocalBottomBarInset = compositionLocalOf { 0.dp }
+
+/**
  * Shared tuning for every glass surface in the app — cards, the bottom capsule, the pill buttons.
  *
  * These live in one place because the whole point of the material is that it looks like *one*
@@ -81,6 +103,20 @@ object LucentGlass {
      */
     const val BLURRED_FILL_DARK = 0.06f
     const val BLURRED_FILL_LIGHT = 0.14f
+
+    /**
+     * Fill for the floating bottom navigation capsule.
+     *
+     * Lighter than the card fills, and deliberately so. A card is a page of content you read ON the
+     * glass, so it can afford a fill that lifts it clearly off the background. The nav capsule is a
+     * small object floating OVER the page, and its whole claim to being glass is that you can see
+     * what is behind it — including, in the case that prompted this, a red button on the Data page.
+     * It carries no blur, no sheen and no gloss (see the bottomBar comment in MainActivity), so this
+     * fill plus the rim is the entire material; anything heavier here and the capsule goes back to
+     * being a plate.
+     */
+    const val NAV_FILL_DARK = 0.07f
+    const val NAV_FILL_LIGHT = 0.11f
 }
 
 /** True when the current theme draws light-on-dark. */

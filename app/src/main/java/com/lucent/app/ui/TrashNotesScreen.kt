@@ -1,6 +1,7 @@
 package com.lucent.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -181,7 +182,9 @@ fun TrashNotesScreen(onBack: () -> Unit) {
 
         LazyColumn(
             modifier = Modifier.hazeSource(state = hazeState),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            // Reserve the floating capsule's height so the last row clears the pill.
+            contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
         ) {
             items(filtered, key = { it.id }) { note ->
                 TrashedNoteCard(

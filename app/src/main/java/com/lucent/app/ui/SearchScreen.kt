@@ -3,6 +3,7 @@ package com.lucent.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -227,7 +228,9 @@ fun SearchScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 LazyColumn(
                     modifier = Modifier.hazeSource(state = hazeState),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    // Reserve the floating capsule's height so the last row clears the pill.
+                    contentPadding = PaddingValues(bottom = LocalBottomBarInset.current)
                 ) {
                     if (noteResults.isNotEmpty()) {
                         item(key = "notes_header") {

@@ -661,7 +661,11 @@ fun AssistantScreen(active: Boolean = true) {
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+    // The whole column reserves the floating capsule's height at its bottom (LocalBottomBarInset),
+    // which keeps the input row sitting just above the pill rather than trapped behind it — exactly
+    // where it was before the capsule was made to float. The chat list fills the space above the
+    // input row.
+    Column(modifier = Modifier.fillMaxSize().padding(12.dp).padding(bottom = LocalBottomBarInset.current)) {
         // Conversation bar: start a new conversation (keeping old ones), switch between saved
         // conversations, or delete the current one. Kept to a single compact row so the chat
         // stays the focus.

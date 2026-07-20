@@ -105,7 +105,12 @@ object AppReady {
 fun LucentSplash(
     paletteColors: List<Color>,
     backdropColor: Color,
-    onFinished: () -> Unit
+    onFinished: () -> Unit,
+    // Whether the drifting blob background animates behind the cat. Passed straight through to
+    // [FluidGlassBackground] so the splash obeys the SAME "drifting background" setting the app
+    // does: off in Settings means off here too, from the very first frame — never blobs during the
+    // cat and stillness after it.
+    backgroundAnimated: Boolean = true
 ) {
     val onGradient = LocalOnGradient.current
     val inspection = LocalInspectionMode.current
@@ -154,10 +159,12 @@ fun LucentSplash(
             }
     ) {
         // The same living background the app itself uses, so the splash is the app arriving rather
-        // than a separate screen shown in front of it.
+        // than a separate screen shown in front of it — including whether it drifts at all, which
+        // follows the user's "drifting background" setting exactly like the app behind it.
         FluidGlassBackground(
             palette = paletteColors,
             backdropColor = backdropColor,
+            animated = backgroundAnimated,
             modifier = Modifier.fillMaxSize()
         )
 
