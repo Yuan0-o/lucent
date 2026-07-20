@@ -849,7 +849,13 @@ open class Tr {
     open fun importVersionsRestored(count: Int): String = " (${count} note versions restored.)"
     open fun importDuplicatesSkipped(count: Int): String = " (${count} duplicate entries skipped.)"
     open fun attachmentTooLarge(size: String, limit: String): String = "That file is ${size}, over the ${limit} limit for a single attachment. It wasn't added."
-    open val lmTextOnlyNote: String = "Text only: the local assistant reads and writes text. It cannot see images, PDFs, audio or any other attachment — multimodal models are not supported in local mode. Attach files to the cloud assistant instead."
+    // TODO(local-multimodal): this note describes a TEMPORARY gap, not a permanent design decision.
+    // The on-device engine currently loads text-only GGUF models, so images, PDFs and audio are not
+    // passed to it. Multimodal on-device support (an mmproj/vision projector alongside the model,
+    // and an attachment path into LocalLlm.generate) is planned for a future release. When it lands,
+    // rewrite this string in all four languages and remove the "for now" framing — leaving a
+    // temporary limitation described as permanent is how a shipped feature stays hidden.
+    open val lmTextOnlyNote: String = "Text only, for now: the local assistant reads and writes text, and cannot yet see images, PDFs, audio or other attachments. This is a current limitation of on-device mode rather than a permanent one \u2014 multimodal support for local models is planned for a future version. Until then, attach files to the cloud assistant instead."
     open val lmSubTogglesResetNote: String = "Tools and GPU always start off each time you turn the local assistant on, even if you had them on last time — so a heavy option can never be inherited silently."
     open val lmEnableToConfigureNote: String = "Turn on the switch above to import a model and configure the local assistant."
     open val lmNeedModelNotice: String = "The local assistant is on but no model is imported yet. Import a GGUF model below — until then the assistant has nothing to answer with."
@@ -871,6 +877,33 @@ open class Tr {
     open val attachmentsSectionTitle: String = "Attachments"
     open val attachmentsSectionHint: String = "Images, PDFs, audio or any other file."
     open val helpLocalizedFilters: String = "Filters also work in your own language — type 完成 / 完了 / 완료 instead of is:done. Wrap a word in quotes to search for it literally."
+
+    // ---- Editable tool confirmations, declined actions, and modular backup ----
+    open fun assistantDeclinedReply(details: String): String = "You said no, so I didn’t do it — ${details}. Nothing was changed. Tell me if you’d like it done differently."
+    open val confirmEditTitleLabel: String = "Title"
+    open val confirmEditNewTitleLabel: String = "New title"
+    open val confirmEditItemLabel: String = "Item"
+    open val confirmEditHint: String = "You can edit this before confirming."
+    open val backupChooseWhat: String = "What to include"
+    open val restoreChooseWhat: String = "What to restore"
+    open val backupModNotes: String = "Notes"
+    open val backupModTasks: String = "Tasks"
+    open val backupModChats: String = "Assistant conversations"
+    open val backupModSettings: String = "App settings"
+    open val backupModApi: String = "API profiles and keys"
+    open val backupModLocalAssistant: String = "Local assistant settings"
+    open val backupModLocalModelFiles: String = "Local model files"
+    open fun backupModLocalModelFilesDesc(size: String): String = "Includes the imported .gguf files themselves (${size}), so a restore brings the model back too. This makes the backup very large — leave it off if you only want your notes and settings."
+    open val backupSelectionEmpty: String = "Pick at least one thing to include."
+    open fun backupModelFilesRestored(count: Int): String = " Restored ${count} local model file(s)."
+    open fun backupModelsInFile(count: Int): String = "${count} local model file(s)"
+
+    // ---- Per-item backup selection (second-level picker) ----
+    open val backupChooseItems: String = "Choose…"
+    open fun backupNOfM(chosen: Int, total: Int): String = "${chosen} of ${total} selected"
+    open val backupPickNotesTitle: String = "Which notes?"
+    open val backupPickTasksTitle: String = "Which tasks?"
+    open val backupNothingToPick: String = "There is nothing here to back up yet."
 }
 
 object En : Tr()
@@ -1617,7 +1650,7 @@ object Zh : Tr() {
     override fun importVersionsRestored(count: Int): String = "（已恢复 ${count} 个笔记版本。）"
     override fun importDuplicatesSkipped(count: Int): String = "（已跳过 ${count} 条重复条目。）"
     override fun attachmentTooLarge(size: String, limit: String): String = "该文件为 ${size}，超过了单个附件 ${limit} 的上限，未被添加。"
-    override val lmTextOnlyNote: String = "仅支持纯文本：本地助手只能读写文字，无法识别图片、PDF、音频或任何其他附件——本地模式不支持多模态模型。需要发送附件时，请改用云端助手。"
+    override val lmTextOnlyNote: String = "目前仅支持纯文本：本地助手只能读写文字，暂时无法识别图片、PDF、音频或其他附件。这是本地模式现阶段的限制，并非永久如此——本地模型的多模态支持已列入后续版本计划。在此之前，需要发送附件请改用云端助手。"
     override val lmSubTogglesResetNote: String = "每次开启本地助手时，「允许使用工具」与「使用 GPU」都会自动回到关闭状态，即使上一次开启过也是如此——避免高开销选项被悄悄继承。"
     override val lmEnableToConfigureNote: String = "开启上方的开关后，即可导入模型并配置本地助手。"
     override val lmNeedModelNotice: String = "本地助手已开启，但尚未导入模型。请在下方导入一个 GGUF 模型——在此之前助手无法作答。"
@@ -1639,6 +1672,33 @@ object Zh : Tr() {
     override val attachmentsSectionTitle: String = "附件"
     override val attachmentsSectionHint: String = "图片、PDF、音频或任意其他文件。"
     override val helpLocalizedFilters: String = "筛选词也支持用你自己的语言输入——可以直接输入「已完成」，无需 is:done。用引号括起来则按字面搜索。"
+
+    // ---- Editable tool confirmations, declined actions, and modular backup ----
+    override fun assistantDeclinedReply(details: String): String = "你拒绝了这个操作，所以我没有执行——${details}。什么都没有改变。如果想换个方式，告诉我就行。"
+    override val confirmEditTitleLabel: String = "标题"
+    override val confirmEditNewTitleLabel: String = "新标题"
+    override val confirmEditItemLabel: String = "条目"
+    override val confirmEditHint: String = "确认前可以先修改。"
+    override val backupChooseWhat: String = "备份内容"
+    override val restoreChooseWhat: String = "还原内容"
+    override val backupModNotes: String = "笔记"
+    override val backupModTasks: String = "任务"
+    override val backupModChats: String = "助手对话"
+    override val backupModSettings: String = "应用设置"
+    override val backupModApi: String = "API 配置与密钥"
+    override val backupModLocalAssistant: String = "本地助手设置"
+    override val backupModLocalModelFiles: String = "本地模型文件"
+    override fun backupModLocalModelFilesDesc(size: String): String = "包含已导入的 .gguf 模型文件本体（${size}），还原时模型也会一并恢复。这会使备份文件非常大——如果只想备份笔记和设置，请保持关闭。"
+    override val backupSelectionEmpty: String = "请至少选择一项内容。"
+    override fun backupModelFilesRestored(count: Int): String = "已还原 ${count} 个本地模型文件。"
+    override fun backupModelsInFile(count: Int): String = "${count} 个本地模型文件"
+
+    // ---- Per-item backup selection (second-level picker) ----
+    override val backupChooseItems: String = "选择…"
+    override fun backupNOfM(chosen: Int, total: Int): String = "已选 ${chosen}/${total}"
+    override val backupPickNotesTitle: String = "选择要备份的笔记"
+    override val backupPickTasksTitle: String = "选择要备份的任务"
+    override val backupNothingToPick: String = "目前没有可备份的内容。"
 }
 
 object Ja : Tr() {
@@ -2383,7 +2443,7 @@ object Ja : Tr() {
     override fun importVersionsRestored(count: Int): String = "（メモのバージョン${count}件を復元。）"
     override fun importDuplicatesSkipped(count: Int): String = "（重複${count}件をスキップ。）"
     override fun attachmentTooLarge(size: String, limit: String): String = "そのファイルは${size}で、添付1件あたりの上限${limit}を超えています。追加されませんでした。"
-    override val lmTextOnlyNote: String = "テキスト専用：ローカルアシスタントは文字の読み書きのみ行えます。画像・PDF・音声などの添付は認識できません（ローカルモードはマルチモーダルモデルに対応していません）。添付が必要な場合はクラウドアシスタントをご利用ください。"
+    override val lmTextOnlyNote: String = "現在はテキスト専用：ローカルアシスタントは文字の読み書きのみ行え、画像・PDF・音声などの添付はまだ認識できません。これはローカルモードの現時点での制限であり、恒久的なものではありません。ローカルモデルのマルチモーダル対応は今後のバージョンで予定しています。それまでは添付が必要な場合クラウドアシスタントをご利用ください。"
     override val lmSubTogglesResetNote: String = "ローカルアシスタントをオンにするたび、「ツールの使用」と「GPU」は前回オンにしていても必ずオフから始まります。負荷の高い設定が知らないうちに引き継がれることはありません。"
     override val lmEnableToConfigureNote: String = "上のスイッチをオンにすると、モデルのインポートとローカルアシスタントの設定ができます。"
     override val lmNeedModelNotice: String = "ローカルアシスタントはオンですが、モデルがまだインポートされていません。下でGGUFモデルをインポートしてください。それまではアシスタントは応答できません。"
@@ -2405,6 +2465,33 @@ object Ja : Tr() {
     override val attachmentsSectionTitle: String = "添付ファイル"
     override val attachmentsSectionHint: String = "画像・PDF・音声など、どんなファイルでも。"
     override val helpLocalizedFilters: String = "フィルターは日本語でも使えます。is:done の代わりに「完了」と入力できます。引用符で囲むと、その語をそのまま検索します。"
+
+    // ---- Editable tool confirmations, declined actions, and modular backup ----
+    override fun assistantDeclinedReply(details: String): String = "ご承認いただけなかったので実行していません——${details}。何も変更されていません。別の形でご希望でしたら教えてください。"
+    override val confirmEditTitleLabel: String = "タイトル"
+    override val confirmEditNewTitleLabel: String = "新しいタイトル"
+    override val confirmEditItemLabel: String = "項目"
+    override val confirmEditHint: String = "確認前に編集できます。"
+    override val backupChooseWhat: String = "バックアップ対象"
+    override val restoreChooseWhat: String = "復元対象"
+    override val backupModNotes: String = "メモ"
+    override val backupModTasks: String = "タスク"
+    override val backupModChats: String = "アシスタントの会話"
+    override val backupModSettings: String = "アプリ設定"
+    override val backupModApi: String = "APIプロファイルとキー"
+    override val backupModLocalAssistant: String = "ローカルアシスタント設定"
+    override val backupModLocalModelFiles: String = "ローカルモデルのファイル"
+    override fun backupModLocalModelFilesDesc(size: String): String = "インポート済みの .gguf ファイル自体（${size}）を含めるため、復元時にモデルも戻ります。バックアップが非常に大きくなるので、メモと設定だけでよければオフのままにしてください。"
+    override val backupSelectionEmpty: String = "少なくとも 1 つ選んでください。"
+    override fun backupModelFilesRestored(count: Int): String = "ローカルモデルファイル ${count} 件を復元しました。"
+    override fun backupModelsInFile(count: Int): String = "ローカルモデルファイル ${count} 件"
+
+    // ---- Per-item backup selection (second-level picker) ----
+    override val backupChooseItems: String = "選択…"
+    override fun backupNOfM(chosen: Int, total: Int): String = "${total} 件中 ${chosen} 件を選択"
+    override val backupPickNotesTitle: String = "バックアップするメモ"
+    override val backupPickTasksTitle: String = "バックアップするタスク"
+    override val backupNothingToPick: String = "バックアップできるものはまだありません。"
 }
 
 object Ko : Tr() {
@@ -3149,7 +3236,7 @@ object Ko : Tr() {
     override fun importVersionsRestored(count: Int): String = " (노트 버전 ${count}개 복원됨.)"
     override fun importDuplicatesSkipped(count: Int): String = " (중복 항목 ${count}개 건너뜀.)"
     override fun attachmentTooLarge(size: String, limit: String): String = "해당 파일은 ${size}(으)로 첨부 파일당 ${limit} 제한을 초과하여 추가되지 않았습니다."
-    override val lmTextOnlyNote: String = "텍스트 전용: 로컬 어시스턴트는 글만 읽고 씁니다. 이미지, PDF, 오디오 등 첨부 파일은 인식할 수 없습니다(로컬 모드는 멀티모달 모델을 지원하지 않습니다). 첨부가 필요하면 클라우드 어시스턴트를 사용하세요."
+    override val lmTextOnlyNote: String = "현재는 텍스트 전용: 로컬 어시스턴트는 글만 읽고 쓰며, 이미지·PDF·오디오 등 첨부 파일은 아직 인식하지 못합니다. 이것은 로컬 모드의 현재 제약일 뿐 영구적인 것은 아니며, 로컬 모델의 멀티모달 지원은 향후 버전에 추가될 예정입니다. 그전까지 첨부가 필요하면 클라우드 어시스턴트를 사용하세요."
     override val lmSubTogglesResetNote: String = "로컬 어시스턴트를 켤 때마다 '도구 사용'과 'GPU'는 지난번에 켜 두었더라도 항상 꺼진 상태로 시작합니다. 부담이 큰 옵션이 조용히 이어지지 않도록 하기 위함입니다."
     override val lmEnableToConfigureNote: String = "위 스위치를 켜면 모델을 가져오고 로컬 어시스턴트를 설정할 수 있습니다."
     override val lmNeedModelNotice: String = "로컬 어시스턴트는 켜져 있지만 아직 가져온 모델이 없습니다. 아래에서 GGUF 모델을 가져오세요. 그전까지는 어시스턴트가 답변할 수 없습니다."
@@ -3171,4 +3258,31 @@ object Ko : Tr() {
     override val attachmentsSectionTitle: String = "첨부 파일"
     override val attachmentsSectionHint: String = "이미지, PDF, 오디오 등 모든 파일."
     override val helpLocalizedFilters: String = "필터는 한국어로도 사용할 수 있습니다. is:done 대신 '완료'라고 입력하면 됩니다. 따옴표로 묶으면 글자 그대로 검색합니다."
+
+    // ---- Editable tool confirmations, declined actions, and modular backup ----
+    override fun assistantDeclinedReply(details: String): String = "거절하셔서 실행하지 않았습니다 — ${details}. 변경된 것은 없습니다. 다른 방식을 원하시면 말씀해 주세요."
+    override val confirmEditTitleLabel: String = "제목"
+    override val confirmEditNewTitleLabel: String = "새 제목"
+    override val confirmEditItemLabel: String = "항목"
+    override val confirmEditHint: String = "확인하기 전에 수정할 수 있습니다."
+    override val backupChooseWhat: String = "백업 항목"
+    override val restoreChooseWhat: String = "복원 항목"
+    override val backupModNotes: String = "노트"
+    override val backupModTasks: String = "할 일"
+    override val backupModChats: String = "어시스턴트 대화"
+    override val backupModSettings: String = "앱 설정"
+    override val backupModApi: String = "API 프로필과 키"
+    override val backupModLocalAssistant: String = "로컬 어시스턴트 설정"
+    override val backupModLocalModelFiles: String = "로컬 모델 파일"
+    override fun backupModLocalModelFilesDesc(size: String): String = "가져온 .gguf 파일 자체(${size})를 포함하므로 복원 시 모델도 함께 돌아옵니다. 백업 파일이 매우 커지므로 노트와 설정만 필요하다면 꺼 두세요."
+    override val backupSelectionEmpty: String = "최소 한 가지를 선택하세요."
+    override fun backupModelFilesRestored(count: Int): String = "로컬 모델 파일 ${count}개를 복원했습니다."
+    override fun backupModelsInFile(count: Int): String = "로컬 모델 파일 ${count}개"
+
+    // ---- Per-item backup selection (second-level picker) ----
+    override val backupChooseItems: String = "선택…"
+    override fun backupNOfM(chosen: Int, total: Int): String = "${total}개 중 ${chosen}개 선택"
+    override val backupPickNotesTitle: String = "백업할 노트"
+    override val backupPickTasksTitle: String = "백업할 할 일"
+    override val backupNothingToPick: String = "아직 백업할 항목이 없습니다."
 }
