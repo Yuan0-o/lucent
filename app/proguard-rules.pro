@@ -20,6 +20,21 @@
     native <methods>;
 }
 
+# --- JNI bridge to the on-device model engine (liblucent_llama, local/LocalLlm.kt) ---
+# lucent_llama.cpp streams tokens back into Kotlin by looking up the callback method BY NAME:
+#   GetMethodID(cbClass, "onPiece", "(Ljava/lang/String;)V")
+# `onPiece` is never called from Java/Kotlin code (only from native), so without these rules R8
+# strips or renames it in every minified release build. GetMethodID then fails and each local
+# generation dies with a NoSuchMethodError the Kotlin side reports as error code -20 (or -2) —
+# the model loads fine but never produces a single token. Keep the holder, the callback interface,
+# and the onPiece implementation on every class that implements it (the anonymous object in
+# LocalLlm.generate), all by their real names.
+-keep class com.lucent.app.local.LocalLlm { *; }
+-keep interface com.lucent.app.local.LocalLlm$PieceCallback { *; }
+-keepclassmembers class * implements com.lucent.app.local.LocalLlm$PieceCallback {
+    public void onPiece(java.lang.String);
+}
+
 # --- SQLCipher (net.zetetic:sqlcipher-android) ---
 # JNI-backed encrypted SQLite. Keep its classes and silence warnings about its optional references.
 -keep class net.sqlcipher.** { *; }
