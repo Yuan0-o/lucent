@@ -172,7 +172,11 @@ Java_com_lucent_app_local_LocalLlm_nativeLoad(JNIEnv * env, jobject, jstring jpa
         llama_sampler_chain_add(s->sampler, llama_sampler_init_temp(0.60f));
         llama_sampler_chain_add(s->sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
-        LOGI("loaded %s (n_ctx=%d, threads=%d, gpu_layers=%d)", path.c_str(), s->n_ctx, (int) cparams.n_threads, (int) n_gpu_layers);
+        char desc[256];
+        llama_model_desc(s->model, desc, sizeof(desc));
+        LOGI("loaded %s (n_ctx=%d, threads=%d, gpu_layers=%d, vocab=%d, n_ctx_train=%d, model=%s)",
+             path.c_str(), s->n_ctx, (int) cparams.n_threads, (int) n_gpu_layers,
+             (int) llama_vocab_n_tokens(s->vocab), (int) llama_model_n_ctx_train(s->model), desc);
         return (jlong) (intptr_t) s;
     } catch (...) {
         LOGE("exception during load");
@@ -263,8 +267,13 @@ Java_com_lucent_app_local_LocalLlm_nativeGenerate(JNIEnv * env, jobject, jlong h
     int rc = 0;
     try {
         const std::string prompt = from_jstring(env, jprompt);
+        if (!s->vocab) { LOGE("generate: vocab is null — model has no tokenizer"); s->busy.store(false); return -9; }
+        LOGI("generate: prompt is %zu chars", prompt.size());
         std::vector<llama_token> tokens = tokenize(s->vocab, prompt, /*add_special=*/true);
-        if (tokens.empty()) { s->busy.store(false); return -3; }
+        if (tokens.empty()) {
+            LOGE("generate: tokenize returned 0 tokens for a %zu-char prompt — tokenizer/model mismatch", prompt.size());
+            s->busy.store(false); return -3;
+        }
 
         const int budget = max_new > 0 ? max_new : 512;
         // Keep the *tail* of an over-long prompt: the newest turns matter most, and truncating
