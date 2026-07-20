@@ -222,6 +222,11 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
+
+    // Biometric unlock for the App Lock. BiometricPrompt requires the host Activity to be a
+    // FragmentActivity, so fragment-ktx is pinned to a version that pairs with activity 1.9.x.
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
