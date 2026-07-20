@@ -3,6 +3,7 @@ package com.lucent.app.local
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.lucent.app.data.LocalSecrets
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -96,7 +97,18 @@ object LocalModelStore {
         }
 
         return try {
-            val root = JSONObject(indexFile.readText())
+            // Sealed by writeIndex. LocalSecrets.decrypt returns the input unchanged when it has no
+            // envelope prefix, so a manifest written by an older build (plain JSON) still reads —
+            // and is re-sealed the next time anything writes it.
+            val raw = indexFile.readText()
+            val decrypted = LocalSecrets.decrypt(raw)
+            // decrypt() returns "" when a genuinely sealed value cannot be opened — the Keystore key
+            // having been invalidated by a lock-screen change is the realistic case. Falling through
+            // to the catch below would report "no models", and the user would open Settings to find
+            // every model gone while several gigabytes still sat on disk. Rebuild from the files
+            // instead: the names are lost, the models are not.
+            if (decrypted.isEmpty() && raw.isNotEmpty()) return rebuildFromFiles(context)
+            val root = JSONObject(decrypted)
             val arr = root.optJSONArray("slots") ?: JSONArray()
             val slots = (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -112,8 +124,40 @@ object LocalModelStore {
                 ?: slots.firstOrNull()?.id
             ModelIndex(slots, active)
         } catch (_: Throwable) {
-            ModelIndex(emptyList(), null)
+            // A corrupt or unreadable manifest is recoverable for the same reason: the .gguf files
+            // are the data, and the manifest is only a label for them.
+            rebuildFromFiles(context)
         }
+    }
+
+    /**
+     * Reconstruct the slot list by looking at what is actually on disk, for when the manifest can no
+     * longer be read (an invalidated Keystore key, a corrupt write).
+     *
+     * Import names files `model_<id>.gguf`, so the id is recoverable from the filename and the
+     * slots keep their identity across the rebuild — which matters, because the settings block of a
+     * backup and the engine's own resident-slot tracking both key on that id. Only the user-chosen
+     * NAME is genuinely lost, and it is replaced with the file name so nothing is label-less. The
+     * rebuilt manifest is written back immediately, sealed with whatever key works now, so this
+     * recovery runs once rather than on every read.
+     */
+    @Synchronized
+    private fun rebuildFromFiles(context: Context): ModelIndex {
+        val dir = dir(context)
+        val files = dir.listFiles()?.filter {
+            it.isFile && it.name.lowercase().endsWith(".gguf") && it.length() > 0L
+        }.orEmpty().sortedBy { it.name }
+        if (files.isEmpty()) return ModelIndex(emptyList(), null)
+        val slots = files.take(MAX_MODELS).map { f ->
+            val id = f.name.removePrefix("model_").removeSuffix(".gguf").ifBlank { newId() }
+            ModelSlot(id = id, name = f.name, fileName = f.name)
+        }
+        val rebuilt = ModelIndex(slots, slots.firstOrNull()?.id)
+        try {
+            writeIndex(context, rebuilt)
+        } catch (_: Throwable) {
+        }
+        return rebuilt
     }
 
     @Synchronized
@@ -126,7 +170,15 @@ object LocalModelStore {
         }
         val root = JSONObject().put("slots", arr)
         idx.activeId?.let { root.put("active", it) }
-        File(dir, INDEX_FILE).writeText(root.toString())
+        // Sealed, not written in the clear (encryption audit).
+        //
+        // The WEIGHTS are deliberately left as plain bytes — see the class comment — but this
+        // manifest is not weights, it is text the user typed. A model slot's name is whatever they
+        // chose to call it, and people name things after what they use them for. It is small, it is
+        // written rarely, and it sits in the same app-private directory as everything else, so
+        // sealing it costs nothing measurable and closes the one place in this feature where user
+        // input was landing on disk readable.
+        File(dir, INDEX_FILE).writeText(LocalSecrets.encrypt(root.toString()))
     }
 
     // ---------------------------------------------------------------------------------------
@@ -274,6 +326,110 @@ object LocalModelStore {
         val remaining = idx.slots.filter { it.id != id }
         val newActive = if (idx.activeId == id) remaining.firstOrNull()?.id else idx.activeId
         writeIndex(context, ModelIndex(remaining, newActive))
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Backup support (task 9)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * The manifest, as the JSON that goes into a backup file.
+     *
+     * This is the metadata half of a local-model backup: which slots exist, what the user named
+     * them, and which one is active. It is a few hundred bytes, so it always travels when the
+     * local-assistant module is selected — the multi-gigabyte `.gguf` payloads are a separate,
+     * opt-in module (see [readModelBytes] / [restoreFromBackup]).
+     *
+     * Keeping the two separable is what makes a partial restore sensible rather than merely
+     * possible. Restoring names without files gives an honest empty state that says which models
+     * this profile expects; restoring files without names would give you three anonymous blobs.
+     */
+    @Synchronized
+    fun exportManifestJson(context: Context): String {
+        // Deliberately plaintext JSON. It is about to be sealed inside the backup envelope, and
+        // LocalSecrets is device-bound — re-using it here would produce a manifest that only the
+        // origin phone could ever read, which is the exact cross-device failure the backup format
+        // was fixed to avoid.
+        val idx = index(context)
+        val arr = JSONArray()
+        idx.slots.forEach { s ->
+            arr.put(
+                JSONObject()
+                    .put("id", s.id)
+                    .put("name", s.name)
+                    .put("file", s.fileName)
+                    .put("size", File(dir(context), s.fileName).length())
+            )
+        }
+        val root = JSONObject().put("slots", arr)
+        idx.activeId?.let { root.put("active", it) }
+        return root.toString()
+    }
+
+    /** Total bytes of every imported model — what the backup dialog quotes before you opt in. */
+    fun totalModelBytes(context: Context): Long =
+        slots(context).sumOf { File(dir(context), it.fileName).length() }
+
+    /** The file backing [slot], for streaming into a backup. Null when it has vanished. */
+    fun modelFileForSlot(context: Context, slot: ModelSlot): File? =
+        File(dir(context), slot.fileName).takeIf { it.exists() && it.length() > 0L }
+
+    /**
+     * Where a restoring backup should write a model file. Returns the destination for [fileName],
+     * creating the directory if needed. Kept here rather than in BackupManager so the on-disk
+     * layout stays this class's private business — a restore that hard-coded "local_model/" would
+     * silently rot the day the directory name changed.
+     */
+    @Synchronized
+    fun prepareRestoreTarget(context: Context, fileName: String): File {
+        val d = dir(context)
+        if (!d.exists()) d.mkdirs()
+        // Entry names from a backup file are never used as paths — only the bare name is taken —
+        // so a hand-edited backup cannot write outside this directory.
+        return File(d, File(fileName).name)
+    }
+
+    /**
+     * Adopt a manifest restored from a backup, keeping only the slots whose files actually landed.
+     *
+     * The filter is the important part. A backup may carry slot metadata without the payloads
+     * (because the user did not select the model-files module, or the restore ran out of space), and
+     * a manifest listing models that are not on disk produces a picker full of entries that can only
+     * fail to load. [index] already drops such entries defensively on read; doing it here as well
+     * means the file written is correct rather than merely tolerated.
+     *
+     * Returns how many slots survived, so the caller can report honestly.
+     */
+    @Synchronized
+    fun restoreFromBackup(context: Context, manifestJson: String): Int {
+        val d = dir(context)
+        if (!d.exists()) d.mkdirs()
+        val root = try {
+            JSONObject(manifestJson)
+        } catch (_: Throwable) {
+            return 0
+        }
+        val arr = root.optJSONArray("slots") ?: JSONArray()
+        val existing = index(context)
+        val kept = mutableListOf<ModelSlot>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id", "").ifBlank { continue }
+            val fileName = File(o.optString("file", "").ifBlank { continue }).name
+            if (!File(d, fileName).let { it.exists() && it.length() > 0L }) continue
+            // A slot id that already exists on this device wins: the local file is the one the
+            // engine may currently have resident, and quietly relabelling it would be worse than
+            // skipping the incoming entry.
+            if (existing.slots.any { it.id == id }) continue
+            kept.add(ModelSlot(id = id, name = o.optString("name", fileName), fileName = fileName))
+        }
+        val merged = (existing.slots + kept).take(MAX_MODELS)
+        val restoredActive = root.optString("active", "").ifBlank { null }
+        val active = restoredActive?.takeIf { a -> merged.any { it.id == a } }
+            ?: existing.activeId?.takeIf { a -> merged.any { it.id == a } }
+            ?: merged.firstOrNull()?.id
+        writeIndex(context, ModelIndex(merged, active))
+        return kept.size
     }
 
     /** Remove every slot and file (used when wiping all data). Leaves an empty manifest. */
