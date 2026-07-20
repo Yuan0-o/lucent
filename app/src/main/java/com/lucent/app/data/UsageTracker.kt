@@ -72,6 +72,19 @@ object UsageTracker {
      * Record that [id] of [kind] was just opened: bump its count and stamp the open time. Runs a
      * DataStore edit, so call it off the main thread (or from a coroutine) — the callers do.
      */
+    /**
+     * Wipe every recorded open. Used by "Clear all data" (task 8).
+     *
+     * This lives in its own DataStore (`lucent_usage`), separate from `lucent_settings`, so the
+     * settings repository's clearAll never touched it — which meant a full wipe left the Recent
+     * section still ranking notes that no longer existed, scored by a history of the deleted app.
+     * Harmless in effect but wrong in principle: after a wipe there is nothing the app should
+     * remember about what you used to look at.
+     */
+    suspend fun clearAll(context: Context) {
+        context.usageDataStore.edit { it.clear() }
+    }
+
     suspend fun recordOpen(context: Context, kind: Kind, id: Long) {
         val now = System.currentTimeMillis()
         context.usageDataStore.edit { prefs ->

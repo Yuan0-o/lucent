@@ -67,6 +67,26 @@ object DatabaseEncryption {
         return if (marker.exists()) marker.readText().ifBlank { null } else null
     }
 
+    /**
+     * Delete every set-aside database copy — the `lucent.db.locked-<stamp>` files a failed
+     * decryption parks beside the live DB, and a stale `lucent.db.pre-encrypt` left by an
+     * interrupted first-time encryption migration.
+     *
+     * ONLY for the "Clear all data" full wipe (reinstall-equivalence task): in normal operation
+     * these copies are deliberately never deleted (they are someone's data, set aside precisely so
+     * nothing is lost), but a full wipe that left multi-megabyte database snapshots behind would
+     * not be the "as if freshly installed" state it promises.
+     */
+    fun purgeSetAsideDatabases(context: Context) {
+        val appContext = context.applicationContext
+        val dbDir = appContext.getDatabasePath(DB_NAME).parentFile ?: return
+        dbDir.listFiles()?.forEach { f ->
+            if (f.name.startsWith("$DB_NAME.locked-") || f.name == "$DB_NAME.pre-encrypt") {
+                f.delete()
+            }
+        }
+    }
+
     /** Called once the user has restored a backup, or dismissed the notice. */
     fun clearLockedNotice(context: Context) {
         File(context.applicationContext.filesDir, LOCKED_MARKER).delete()
