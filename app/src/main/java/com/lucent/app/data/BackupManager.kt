@@ -51,7 +51,11 @@ object BackupManager {
     // field added since is read back with a default, so an older manifest inside a `.lcb` still
     // restores cleanly. 8 (this build) covers pin/colour/checklist/trash state, task
     // priority/repeat/reminder/subtasks, and note version history.
-    private const val BACKUP_VERSION = 8
+    // 9: the settings block became complete — every user-visible preference travels now, not just
+    // the API/theme subset it started as (task 17). Purely additive: nothing reads this number to
+    // gate behaviour, because every restored key is guarded by has(), so a v8 file restores exactly
+    // as it always did and a v9 file restores fully on any build that understands the keys.
+    private const val BACKUP_VERSION = 9
 
     // ---------------------------------------------------------------------------------------
     // Export
@@ -233,6 +237,51 @@ object BackupManager {
             // it as-is and re-mirror the selected profile into the flat keys.
             .put("apiProfiles", settings.apiProfilesJson.first())
             .put("apiProfileSelected", settings.apiProfileSelected.first())
+            // ---- Everything else the app remembers about how it should behave (task 17) ----
+            //
+            // The block above is the original backup, written when settings *were* the API and the
+            // theme. Several releases have added preferences since, and each one silently widened
+            // the gap between "a backup holds everything" — which the Data page promises in those
+            // words — and what a restore actually put back. A user who restored onto a new phone got
+            // their notes and their API key and then found the app in a language they hadn't chosen,
+            // with Markdown off, links off, their sort orders reset and the assistant's memory tier
+            // back to default. Nothing was lost that could not be re-set by hand, which is precisely
+            // why it went unnoticed for so long, and precisely why it was worth fixing: a backup you
+            // have to spend twenty minutes correcting is not a backup, it is a starting point.
+            //
+            // So every user-visible preference the app stores now travels with the file. Three
+            // things are deliberately still excluded, and each for a reason that would survive the
+            // question "why isn't this in my backup?":
+            //
+            //  - **App-lock credentials.** The hashes are sealed with a key that lives in THIS
+            //    device's hardware Keystore and cannot leave it. Putting them in a portable file
+            //    would ship material that is unusable on the restoring device at best, and at worst
+            //    would lock someone out of the app on a phone where the recovery answer can't be
+            //    verified. The lock is re-set after a restore, on purpose.
+            //  - **The backup password.** Storing the password for a file inside that same file is
+            //    not encryption, it is theatre.
+            //  - **attachments_migrated.** A one-shot marker about *this* install's disk layout. The
+            //    migrator re-derives it correctly on first launch; carrying a stale one across
+            //    devices could skip a migration that the new device still needs.
+            .put("memoryTier", settings.memoryTier.first())
+            .put("webSearchEnabled", settings.webSearchEnabled.first())
+            .put("typingHaptics", settings.typingHapticsEnabled.first())
+            .put("markdownEnabled", settings.markdownEnabled.first())
+            .put("linksEnabled", settings.linksEnabled.first())
+            .put("backgroundAnimationEnabled", settings.backgroundAnimationEnabled.first())
+            .put("appLanguage", settings.appLanguage.first())
+            .put("notesSort", settings.notesSort.first())
+            .put("tasksSort", settings.tasksSort.first())
+            .put("systemIntegrationEnabled", settings.systemIntegrationEnabled.first())
+            .put("startupLoggingEnabled", settings.startupLoggingEnabled.first())
+            // The local-model switches. The model FILE itself is deliberately not in the backup —
+            // it is measured in gigabytes and would turn a ~1 MB restore file into something no one
+            // could email themselves — so these describe intent, and the restore below re-checks
+            // against what is actually on the device before honouring them.
+            .put("localModelEnabled", settings.localModelEnabled.first())
+            .put("localToolsEnabled", settings.localToolsEnabled.first())
+            .put("localGpuEnabled", settings.localGpuEnabled.first())
+            .put("localBackgroundReply", settings.localBackgroundReplyEnabled.first())
 
         return JSONObject()
             .put("version", BACKUP_VERSION)
@@ -623,6 +672,64 @@ object BackupManager {
                 if (profiles.isNotEmpty()) {
                     val sel = s.optInt("apiProfileSelected", 0)
                     settings.saveApiProfiles(profiles, sel)
+                }
+            }
+
+            // ---- The rest of the preferences (task 17) ----
+            //
+            // Each is guarded by has(): an OLDER backup simply doesn't carry these keys, and a
+            // restore from one must leave the current value alone rather than stamping a default
+            // over it. That is what makes this change safe in both directions — a new app reading
+            // an old file changes nothing it wasn't told about.
+            if (s.has("memoryTier")) settings.setMemoryTier(s.optString("memoryTier"))
+            if (s.has("webSearchEnabled")) settings.setWebSearchEnabled(s.optBoolean("webSearchEnabled"))
+            if (s.has("typingHaptics")) settings.setTypingHapticsEnabled(s.optBoolean("typingHaptics", true))
+            if (s.has("markdownEnabled")) settings.setMarkdownEnabled(s.optBoolean("markdownEnabled"))
+            if (s.has("linksEnabled")) settings.setLinksEnabled(s.optBoolean("linksEnabled"))
+            if (s.has("backgroundAnimationEnabled")) {
+                settings.setBackgroundAnimationEnabled(s.optBoolean("backgroundAnimationEnabled", true))
+            }
+            if (s.has("appLanguage")) settings.setAppLanguage(s.optString("appLanguage"))
+            if (s.has("notesSort")) settings.setNotesSort(s.optString("notesSort"))
+            if (s.has("tasksSort")) settings.setTasksSort(s.optString("tasksSort"))
+            if (s.has("localBackgroundReply")) {
+                settings.setLocalBackgroundReplyEnabled(s.optBoolean("localBackgroundReply"))
+            }
+
+            // System integration is a preference AND an OS-level component state; restoring the flag
+            // without flipping the manifest component would leave the app claiming a share-sheet
+            // entry it doesn't have. Both move together, exactly as the Privacy toggle does.
+            if (s.has("systemIntegrationEnabled")) {
+                val shareOn = s.optBoolean("systemIntegrationEnabled")
+                settings.setSystemIntegrationEnabled(shareOn)
+                ShareIntegration.setEnabled(context, shareOn)
+            }
+            // Same shape for logging: the flag and the live logger are one decision.
+            if (s.has("startupLoggingEnabled")) {
+                val loggingOn = s.optBoolean("startupLoggingEnabled")
+                settings.setStartupLoggingEnabled(loggingOn)
+                StartupLog.setEnabled(loggingOn)
+            }
+
+            // Local model: restore the intent, but never restore it into a lie. The GGUF file is not
+            // in the backup (see the export side), so on a phone with no model imported, honouring a
+            // stored "local model on" would hand the user an assistant that cannot answer anything
+            // and an API page frozen shut with no visible cause. When there is no model, local mode
+            // stays off and the cloud API keeps working — the honest state for that device.
+            if (s.has("localModelEnabled")) {
+                val wantLocal = s.optBoolean("localModelEnabled")
+                val hasModel = try {
+                    com.lucent.app.local.LocalModelStore.hasModel(context)
+                } catch (t: Throwable) {
+                    false
+                }
+                settings.setLocalModelEnabled(wantLocal && hasModel)
+                // Tools/GPU are only meaningful with local mode actually on. setLocalModelEnabled
+                // has just reset both to off (task 1), so re-applying the backed-up values here
+                // would fight that rule; they are restored only when local mode really came back.
+                if (wantLocal && hasModel) {
+                    if (s.has("localToolsEnabled")) settings.setLocalToolsEnabled(s.optBoolean("localToolsEnabled"))
+                    if (s.has("localGpuEnabled")) settings.setLocalGpuEnabled(s.optBoolean("localGpuEnabled"))
                 }
             }
         }

@@ -139,6 +139,24 @@ private object SettingsKeys {
     // some Android drivers, so it is opt-in with a warning. Only takes effect when the build ships a
     // GPU backend (see app/src/main/cpp/CMakeLists.txt); otherwise the engine stays on CPU regardless.
     val LOCAL_GPU_ENABLED = booleanPreferencesKey("local_gpu_enabled")
+
+    // Whether an in-flight local reply keeps generating after the app leaves the foreground. OFF by
+    // default, and deliberately so: a resident multi-gigabyte model is the single heaviest thing
+    // this app can hold, and holding it for a screen the user has walked away from is how a notes
+    // app earns a reputation for making the phone crawl. Off means backgrounding stops the reply and
+    // frees the model; on is opt-in behind a warning (see the Local model page).
+    val LOCAL_BACKGROUND_REPLY = booleanPreferencesKey("local_background_reply")
+
+    // ---- What local mode borrowed, so it can give it back ----
+    //
+    // Turning the local model on forces the memory tier down to LOW and web search off (tasks 3/8):
+    // an on-device model answers offline and does badly with a long prompt, so those two settings
+    // cannot mean what they say while it is running. Overwriting them outright would silently
+    // *destroy* the user's cloud-assistant configuration, so the previous values are parked here
+    // first and restored the moment local mode is switched back off. They exist only between those
+    // two events; disabling local mode consumes and removes them.
+    val MEMORY_TIER_PRELOCAL = stringPreferencesKey("memory_tier_prelocal")
+    val WEB_SEARCH_PRELOCAL = booleanPreferencesKey("web_search_prelocal")
 }
 
 // Internal default chat style. Deliberately never surfaced in the Settings UI (the Chat Style
@@ -231,7 +249,12 @@ class SettingsRepository(private val context: Context) {
         // in one language and snapping to another a beat later would be the same "blink" the display
         // prefs exist to prevent, so it rides in the same single read. Defaults to English — the app
         // ships English-first and the user picks another language (or "follow system") in Settings.
-        val appLanguage: String = "en"
+        val appLanguage: String = "en",
+        // Whether the drifting background animates. First-frame state too: the SPLASH draws the
+        // same background, so if this were read asynchronously the splash of a user who turned the
+        // effect off would open with drifting blobs and only go still a beat later — exactly the
+        // splash/app mismatch this synchronous read exists to prevent.
+        val backgroundAnimationEnabled: Boolean = true
     )
 
     suspend fun startupPrefsOnce(): StartupPrefs {
@@ -245,7 +268,8 @@ class SettingsRepository(private val context: Context) {
             appLockEnabled = prefs[SettingsKeys.APP_LOCK_ENABLED] ?: false,
             startupLoggingEnabled = prefs[SettingsKeys.STARTUP_LOGGING_ENABLED] ?: false,
             systemIntegrationEnabled = prefs[SettingsKeys.SYSTEM_INTEGRATION_ENABLED] ?: false,
-            appLanguage = prefs[SettingsKeys.APP_LANGUAGE] ?: "en"
+            appLanguage = prefs[SettingsKeys.APP_LANGUAGE] ?: "en",
+            backgroundAnimationEnabled = prefs[SettingsKeys.BACKGROUND_ANIMATION_ENABLED] ?: true
         )
     }
 
@@ -260,7 +284,75 @@ class SettingsRepository(private val context: Context) {
     // ---- Local model (task: on-device GGUF assistant) ----
     /** Whether the assistant answers with the imported on-device model. Off by default. */
     val localModelEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.LOCAL_MODEL_ENABLED] ?: false }
-    suspend fun setLocalModelEnabled(value: Boolean) { context.settingsDataStore.edit { it[SettingsKeys.LOCAL_MODEL_ENABLED] = value } }
+
+    /**
+     * Flip local-model mode, and apply (or undo) everything that mode implies — in ONE edit.
+     *
+     * Local mode is not just a routing switch; it changes what four other settings are allowed to
+     * be. Rather than leave those rules scattered across the Settings UI, where a future call site
+     * could forget one and leave the app in a state its own screens claim is impossible, they live
+     * here, on the only function that can turn the mode on:
+     *
+     *  - **Tools and GPU reset to off** every time local mode is switched on, even if the user had
+     *    them on before (task 1). Both cost real performance on a phone, and inheriting an expensive
+     *    option from a session weeks ago — invisibly, at the moment a heavy model loads — is exactly
+     *    the kind of surprise that gets blamed on the app rather than on the setting.
+     *  - **Memory drops to LOW and web search goes off** (tasks 3/8), because neither can honestly
+     *    apply: the on-device model has no network, and a long prompt is more than it handles well.
+     *    The *previous* values are parked in the PRELOCAL keys first.
+     *  - **Turning local mode off restores those parked values** and clears the parking slots. The
+     *    user gets their cloud assistant back exactly as they left it, not as local mode reduced it.
+     *
+     * One edit, so no reader can ever observe a half-applied switch: the mode and the constraints it
+     * implies land together or not at all.
+     */
+    suspend fun setLocalModelEnabled(value: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            val wasEnabled = prefs[SettingsKeys.LOCAL_MODEL_ENABLED] ?: false
+            prefs[SettingsKeys.LOCAL_MODEL_ENABLED] = value
+            if (value) {
+                // Park the cloud-assistant settings local mode is about to override — but only on a
+                // real off -> on transition. Re-running this while already on would otherwise park
+                // the *constrained* values and lose the originals.
+                if (!wasEnabled) {
+                    prefs[SettingsKeys.MEMORY_TIER_PRELOCAL] =
+                        prefs[SettingsKeys.MEMORY_TIER] ?: MemoryTier.DEFAULT.key
+                    prefs[SettingsKeys.WEB_SEARCH_PRELOCAL] = prefs[SettingsKeys.WEB_SEARCH_ENABLED] ?: false
+                }
+                prefs[SettingsKeys.MEMORY_TIER] = MemoryTier.LOW.key
+                prefs[SettingsKeys.WEB_SEARCH_ENABLED] = false
+                prefs[SettingsKeys.LOCAL_TOOLS_ENABLED] = false
+                prefs[SettingsKeys.LOCAL_GPU_ENABLED] = false
+            } else {
+                // Hand back whatever was parked. A missing slot (an install that was already in
+                // local mode before this logic existed) falls back to the shipped defaults rather
+                // than leaving the constrained values stuck on forever.
+                prefs[SettingsKeys.MEMORY_TIER] =
+                    prefs[SettingsKeys.MEMORY_TIER_PRELOCAL] ?: MemoryTier.DEFAULT.key
+                prefs[SettingsKeys.WEB_SEARCH_ENABLED] = prefs[SettingsKeys.WEB_SEARCH_PRELOCAL] ?: false
+                prefs.remove(SettingsKeys.MEMORY_TIER_PRELOCAL)
+                prefs.remove(SettingsKeys.WEB_SEARCH_PRELOCAL)
+            }
+        }
+    }
+
+    /**
+     * Whether an in-flight local reply survives the app going to the background. Off by default —
+     * backgrounding stops the reply and frees the model (see AssistantController.onAppBackgrounded).
+     */
+    val localBackgroundReplyEnabled: Flow<Boolean> =
+        context.settingsDataStore.data.map { it[SettingsKeys.LOCAL_BACKGROUND_REPLY] ?: false }
+    suspend fun setLocalBackgroundReplyEnabled(value: Boolean) {
+        context.settingsDataStore.edit { it[SettingsKeys.LOCAL_BACKGROUND_REPLY] = value }
+    }
+
+    /**
+     * One-shot read for the lifecycle path. MainActivity.onStop has to decide *immediately* whether
+     * to cut a running reply, with no composition to collect a Flow from, so it reads the value
+     * directly rather than guessing a default.
+     */
+    suspend fun localBackgroundReplyEnabledOnce(): Boolean =
+        context.settingsDataStore.data.first()[SettingsKeys.LOCAL_BACKGROUND_REPLY] ?: false
 
     /** Whether the on-device model may call in-app tools. Off by default (opt-in, perf warning). */
     val localToolsEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[SettingsKeys.LOCAL_TOOLS_ENABLED] ?: false }
@@ -481,6 +573,19 @@ class SettingsRepository(private val context: Context) {
                 prefs.remove(SettingsKeys.LEGACY_API_KEY)
                 prefs.remove(SettingsKeys.LEGACY_BASE_URL)
                 prefs.remove(SettingsKeys.LEGACY_API_SPEC)
+                prefs.remove(SettingsKeys.LEGACY_MODEL)
+            } else {
+                // The user deleted every profile (task 6: the last API is genuinely deletable now).
+                // The mirrored connection keys have to go with it, or the assistant would keep
+                // calling — and keep spending — the credentials of an API the Settings screen says
+                // no longer exists. Clearing them also makes the send path's "no URL / no model"
+                // guard fire, which is what surfaces the "set up an API or import a local model"
+                // hint instead of a confusing network error.
+                prefs.remove(SettingsKeys.BASE_URL_ENC)
+                prefs.remove(SettingsKeys.MODEL_ENC)
+                prefs.remove(SettingsKeys.API_KEY_ENC)
+                prefs.remove(SettingsKeys.LEGACY_API_KEY)
+                prefs.remove(SettingsKeys.LEGACY_BASE_URL)
                 prefs.remove(SettingsKeys.LEGACY_MODEL)
             }
         }

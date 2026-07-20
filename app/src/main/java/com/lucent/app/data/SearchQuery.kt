@@ -362,8 +362,142 @@ data class SearchQuery(
                 "has:subtasks" to com.lucent.app.i18n.S.helpHasSubtasks,
                 "priority:high" to com.lucent.app.i18n.S.helpPriority,
                 "due:today" to com.lucent.app.i18n.S.helpDue,
-                "link:Recipes" to com.lucent.app.i18n.S.helpLink
+                "link:Recipes" to com.lucent.app.i18n.S.helpLink,
+                // Last row on purpose: it is the one that changes what every row above it
+                // means for a reader who does not type English (task 4).
+                "完成 / 完了 / 완료" to com.lucent.app.i18n.S.helpLocalizedFilters
             )
+
+        // =============================================================================
+        // Localized filter input (task 4)
+        // =============================================================================
+        //
+        // The chips above the search box have been translated for a while, so a Chinese user taps
+        // one and sees 已完成 — and then, typing the same search by hand the next day, discovers
+        // that only `is:done` actually filters anything. The filter *language* was English even
+        // where the interface was not, which makes the whole feature look like it is for somebody
+        // else.
+        //
+        // The tables below close that gap by canonicalizing a token BEFORE it reaches the parser.
+        // Nothing downstream changes: `is:done` is still the one grammar the matcher knows, still
+        // what the chips insert, and still what a saved query means. Only the set of spellings that
+        // reach it grows.
+        //
+        // Two deliberate choices:
+        //
+        //  - **All four languages are accepted at once, whatever the UI is set to.** Language is a
+        //    property of the person, not of the app: someone running Lucent in English still thinks
+        //    "完了" when they mean done, and a query typed on a phone set to Korean should still
+        //    work after switching the interface to Japanese. Keying this off L.current would have
+        //    made saved queries silently stop matching when the UI language changed.
+        //  - **The standalone words are exactly the chip labels.** What the chip shows you is what
+        //    you can type, so the row of chips doubles as the documentation for this feature instead
+        //    of being a separate vocabulary to learn.
+        //
+        // The cost, stated plainly: a note containing the literal word "已完成" can no longer be
+        // found by typing that word bare — it now reads as a filter. Quoting it ("已完成") searches
+        // for the text, which is the same escape hatch English users already have for `tag:`, and
+        // the help sheet says so (helpLocalizedFilters).
+
+        /** Localized whole-token spellings of a filter, mapped to the canonical ASCII operator. */
+        private val LOCALIZED_TOKENS: Map<String, String> = buildMap<String, String> {
+            fun alias(canonical: String, vararg spellings: String) {
+                spellings.forEach { put(it.lowercase(), canonical) }
+            }
+            // zh / ja / ko spellings, plus the shorter forms people actually type. Where a language
+            // writes the chip as a phrase ("첨부 있음"), both the phrase with its space removed and
+            // the bare head word are accepted, because a search box is not a place anyone wants to
+            // be precise about spacing.
+            alias("is:pinned", "已置顶", "置顶", "ピン留め", "固定", "고정됨", "고정")
+            alias("is:done", "已完成", "完成", "完了", "완료")
+            alias("is:overdue", "已逾期", "逾期", "过期", "期限切れ", "기한초과", "기한지남")
+            alias("is:archived", "已归档", "归档", "アーカイブ", "보관됨", "보관")
+            alias("is:checklist", "清单", "チェックリスト", "체크리스트")
+            alias("has:attachment", "有附件", "附件", "添付あり", "添付", "첨부있음", "첨부")
+            alias("has:due", "有截止日", "有截止", "截止日", "截止", "期限あり", "기한있음", "마감있음")
+            alias("has:reminder", "有提醒", "提醒", "リマインダー", "알림있음", "알림")
+            alias("has:subtasks", "有子任务", "子任务", "サブタスク", "하위작업")
+            alias("priority:high", "高优先级", "优先级高", "優先度高", "높은우선순위", "우선순위높음")
+            alias("due:today", "今天到期", "今天", "今日期限", "今日", "오늘마감", "오늘")
+            alias("due:week", "本周到期", "本周", "今週期限", "今週", "이번주마감", "이번주")
+        }
+
+        /** Localized names for the part BEFORE the colon in `field:value`. */
+        private val LOCALIZED_FIELDS: Map<String, String> = buildMap<String, String> {
+            fun alias(canonical: String, vararg spellings: String) {
+                spellings.forEach { put(it.lowercase(), canonical) }
+            }
+            alias("tag", "标签", "タグ", "태그")
+            alias("is", "是", "状态", "状態", "상태")
+            alias("has", "有", "含", "あり", "포함")
+            alias("priority", "优先级", "優先度", "우선순위")
+            alias("due", "到期", "期限", "마감")
+            alias("link", "链接", "リンク", "링크")
+        }
+
+        /**
+         * Localized names for the part AFTER the colon, per canonical field. Kept separate from
+         * [LOCALIZED_TOKENS] because the same word means different things in different fields:
+         * `due:今天` is a window, while a bare 今天 is the `due:today` filter.
+         */
+        private val LOCALIZED_VALUES: Map<String, Map<String, String>> = mapOf(
+            "is" to buildMap<String, String> {
+                listOf("已置顶" to "pinned", "置顶" to "pinned", "ピン留め" to "pinned", "固定" to "pinned", "고정" to "pinned", "고정됨" to "pinned",
+                    "已完成" to "done", "完成" to "done", "完了" to "done", "완료" to "done",
+                    "已逾期" to "overdue", "逾期" to "overdue", "期限切れ" to "overdue", "기한초과" to "overdue",
+                    "已归档" to "archived", "归档" to "archived", "アーカイブ" to "archived", "보관됨" to "archived", "보관" to "archived",
+                    "清单" to "checklist", "チェックリスト" to "checklist", "체크리스트" to "checklist"
+                ).forEach { (k, v) -> put(k.lowercase(), v) }
+            },
+            "has" to buildMap<String, String> {
+                listOf("附件" to "attachment", "添付" to "attachment", "첨부" to "attachment",
+                    "截止" to "due", "截止日" to "due", "期限" to "due", "마감" to "due",
+                    "提醒" to "reminder", "リマインダー" to "reminder", "알림" to "reminder",
+                    "子任务" to "subtasks", "サブタスク" to "subtasks", "하위작업" to "subtasks"
+                ).forEach { (k, v) -> put(k.lowercase(), v) }
+            },
+            "priority" to buildMap<String, String> {
+                listOf("高" to "high", "높음" to "high", "中" to "medium", "보통" to "medium",
+                    "低" to "low", "낮음" to "low", "无" to "none", "なし" to "none", "없음" to "none"
+                ).forEach { (k, v) -> put(k.lowercase(), v) }
+            },
+            "due" to buildMap<String, String> {
+                listOf("今天" to "today", "今日" to "today", "오늘" to "today",
+                    "明天" to "tomorrow", "明日" to "tomorrow", "내일" to "tomorrow",
+                    "本周" to "week", "今週" to "week", "이번주" to "week",
+                    "逾期" to "overdue", "期限切れ" to "overdue", "기한초과" to "overdue"
+                ).forEach { (k, v) -> put(k.lowercase(), v) }
+            }
+        )
+
+        /**
+         * Rewrite one raw token into the canonical ASCII operator grammar, or return it unchanged.
+         *
+         * Runs before any parsing decision is made, so every rule below it — quoting, `#tag`,
+         * unknown-token-is-literal-text — behaves identically no matter which language produced the
+         * token. Also normalizes the full-width punctuation a CJK keyboard produces by default:
+         * typing 标签：工作 on a Chinese IME gives U+FF1A, not an ASCII colon, and a filter that
+         * silently fails because of an invisible codepoint is worse than one that doesn't exist.
+         */
+        private fun canonicalizeToken(raw: String): String {
+            // Full-width colon / hash / number sign -> ASCII. Nothing else is touched: the value
+            // half may legitimately contain any character (a tag can be written in any script).
+            val token = raw.replace('：', ':').replace('＃', '#')
+
+            LOCALIZED_TOKENS[token.lowercase()]?.let { return it }
+
+            val colon = token.indexOf(':')
+            if (colon <= 0 || colon == token.lastIndex) return token
+
+            val rawField = token.substring(0, colon).lowercase()
+            val rawValue = token.substring(colon + 1)
+            val field = LOCALIZED_FIELDS[rawField] ?: rawField
+            // tag: and link: take free text (a tag may be written in any language), so their values
+            // are never translated — only the field name is.
+            if (field == "tag" || field == "link") return "$field:$rawValue"
+            val value = LOCALIZED_VALUES[field]?.get(rawValue.lowercase()) ?: rawValue
+            return "$field:$value"
+        }
 
         private val TOKEN = Regex("\"([^\"]*)\"|(\\S+)")
 
@@ -389,7 +523,9 @@ data class SearchQuery(
                     continue
                 }
 
-                val token = match.groupValues[2]
+                // Localized filters are folded into the canonical ASCII grammar here, once, so
+                // everything below this line has exactly one syntax to reason about (task 4).
+                val token = canonicalizeToken(match.groupValues[2])
                 if (token.isBlank()) continue
 
                 // #tag is the shorthand people already type in the tag field itself.
