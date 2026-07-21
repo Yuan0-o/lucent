@@ -1367,14 +1367,9 @@ fun NotesScreen(active: Boolean = true) {
                                     Icon(Icons.Default.MoreVert, contentDescription = com.lucent.app.i18n.S.a11yMoreOptions, tint = onGradientMuted)
                                 }
                                 DropdownMenu(expanded = showOverflowMenu, onDismissRequest = { showOverflowMenu = false }) {
-                                    // "Select notes" is no longer here — selection is entered by
-                                    // long-pressing a note (see onLongPress below). The overflow menu
-                                    // now holds only the three navigation destinations.
-                                    DropdownMenuItem(
-                                        text = { Text(com.lucent.app.i18n.S.searchEverything) },
-                                        leadingIcon = { Icon(Icons.Default.TravelExplore, contentDescription = null) },
-                                        onClick = { showOverflowMenu = false; showSearch = true }
-                                    )
+                                    // Global search is intentionally NOT here on the desktop: the
+                                    // sidebar already has a dedicated Search destination, so repeating
+                                    // it in this menu would be redundant. Only Archive and Trash remain.
                                     DropdownMenuItem(
                                         text = { Text(com.lucent.app.i18n.S.screenArchivedNotes) },
                                         leadingIcon = { Icon(Icons.Default.Inventory2, contentDescription = null) },
@@ -1412,7 +1407,10 @@ fun NotesScreen(active: Boolean = true) {
                 // state now rides *inside* the grid as a full-width item rather than replacing it.
                 LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Fixed(2),
+                    // Four across on the desktop's wide window (Android stays at two). A large monitor
+                    // has the room, and four cards a row reads as a proper board rather than a phone
+                    // list stretched sideways.
+                    columns = GridCells.Fixed(4),
                     modifier = Modifier.fillMaxSize().hazeSource(state = LocalHazeState.current),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),

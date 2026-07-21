@@ -1233,13 +1233,9 @@ fun TasksScreen(active: Boolean = true) {
                                 }
                                 DropdownMenu(expanded = showOverflowMenu, onDismissRequest = { showOverflowMenu = false }) {
                                     // "Select tasks" is no longer here — selection is entered by
-                                    // long-pressing a task (see onLongPress below). The overflow menu
-                                    // now holds only the three navigation destinations.
-                                    DropdownMenuItem(
-                                        text = { Text(com.lucent.app.i18n.S.searchEverything) },
-                                        leadingIcon = { Icon(Icons.Default.TravelExplore, contentDescription = null) },
-                                        onClick = { showOverflowMenu = false; showSearch = true }
-                                    )
+                                    // long-pressing a task (see onLongPress below). Global search is
+                                    // intentionally NOT here on the desktop — the sidebar already has a
+                                    // dedicated Search destination — so only Completed and Trash remain.
                                     DropdownMenuItem(
                                         text = { Text(com.lucent.app.i18n.S.screenCompletedTasks) },
                                         leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
