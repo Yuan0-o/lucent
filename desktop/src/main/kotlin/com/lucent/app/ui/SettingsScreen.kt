@@ -317,14 +317,27 @@ fun SettingsScreen(active: Boolean = true) {
     var apiLimitPrompt by remember { mutableStateOf(false) }
     var exportPasswordVisible by remember { mutableStateOf(false) }
 
-    // A backup that needs a password we don't have. The bytes are held here rather than re-read on
-    // submit, because the picker's Uri may well not still be readable by the time the user finishes
-    // typing — and losing a backup to an expired permission grant would be an absurd way to lose one.
-    var pendingImportBytes by remember { mutableStateOf<ByteArray?>(null) }
+    // The picked backup FILE, held for the import flow's two streaming passes (inspect, then
+    // commit). On desktop the system file dialog hands back a real path that stays readable, so
+    // no staging copy is needed — but this is the USER'S OWN FILE, so unlike the Android build's
+    // cache copy it is never deleted here; letting go of it only drops the reference. The
+    // streaming matters for the same reason as on Android: a backup carrying local model files
+    // is gigabytes, and the old whole-file ByteArray read died in OutOfMemoryError — an Error
+    // the catch blocks never saw — before the preview could even appear.
+    var importSourceFile by remember { mutableStateOf<java.io.File?>(null) }
+    // Whether the password prompt (step 2) is up for the picked file.
+    var importPasswordPrompt by remember { mutableStateOf(false) }
     var importPasswordDraft by remember { mutableStateOf("") }
     var importPasswordError by remember { mutableStateOf(false) }
     // What's in the file, worked out without writing anything. Non-null means the confirm step is up.
     var importPreview by remember { mutableStateOf<BackupManager.BackupPreview?>(null) }
+    // Close the import flow's file state. Called on every exit from the flow — cancel or a failed
+    // inspect. The file is the user's own on desktop, so this only drops the reference; nothing
+    // is ever deleted from their disk.
+    fun discardImportSource() {
+        importSourceFile = null
+        importPasswordPrompt = false
+    }
     // The actual restore + its post-restore housekeeping, in one place so the confirm button and the
     // API-limit prompt drive identical behaviour; only the API profile selection differs between them.
     // Passing a non-null (possibly empty) profile-name set makes the API restore MERGE into this
@@ -334,14 +347,29 @@ fun SettingsScreen(active: Boolean = true) {
         { preview, modules, convIds, apiNames ->
             importPreview = null
             apiLimitPrompt = false
+            // Capture the picked file before launching: commit's second streaming pass reads the
+            // model/font blobs straight from it (see BackupManager — the preview no longer carries
+            // a decrypted payload, which is what used to pin gigabytes of model file in memory and
+            // kill the import with an OutOfMemoryError the catch below could never see).
+            val sourceFile = importSourceFile
             scope.launch {
                 backupStatus = withContext(Dispatchers.IO) {
                     try {
-                        BackupManager.commit(context, db, repo, preview, modules, convIds, apiNames)
-                    } catch (e: Exception) {
-                        S.importFailed(e.message ?: "")
+                        BackupManager.commit(
+                            context, db, repo, preview, modules, convIds, apiNames,
+                            source = sourceFile?.let { BackupManager.fileSource(it) }
+                        )
+                    } catch (t: Throwable) {
+                        // Throwable, not Exception: the failure this flow historically died of was
+                        // an OutOfMemoryError, which is an Error. Streaming makes that unlikely,
+                        // but if anything of the kind ever recurs it must surface as a message,
+                        // not as the app vanishing.
+                        S.importFailed(t.message ?: "")
                     }
                 }
+                // Both passes are done; drop the reference (the user's file itself is untouched).
+                importSourceFile = null
+                importPasswordPrompt = false
                 // A restored backup can bring in tasks that want reminders, and alarms aren't part of
                 // a backup file — they're OS state. BackupManager re-arms them, but the channel has to
                 // exist before one can be posted.
@@ -1049,27 +1077,36 @@ fun SettingsScreen(active: Boolean = true) {
     fun pickImportBackup() {
         val file = DesktopFiles.openFile() ?: return
         scope.launch {
-            val bytes = withContext(Dispatchers.IO) {
+            // Replace whatever a previous, abandoned pick left behind.
+            discardImportSource()
+            // No whole-file read here any more. The old code did `file.readBytes()`, and a backup
+            // carrying local model files is gigabytes — an instant OutOfMemoryError on the JVM
+            // heap, which is an Error the old catch(Exception) never saw, so the app simply died
+            // the moment such a file was picked. BackupManager now streams both of its passes
+            // straight from the file instead.
+            val readable = withContext(Dispatchers.IO) {
                 try {
-                    file.inputStream().use { it.readBytes() }
-                } catch (e: Exception) {
-                    null
+                    file.isFile && file.canRead()
+                } catch (_: Throwable) {
+                    false
                 }
             }
-            if (bytes == null) {
+            if (!readable) {
                 backupStatus = S.couldNotReadThatFile
                 return@launch
             }
+            importSourceFile = file
+            val source = BackupManager.fileSource(file)
 
-            val header = BackupManager.peekPasswordRequirement(bytes)
+            val header = BackupManager.peekPasswordRequirement(source)
             if (header != null && header.needsPassword) {
                 // Try the password saved on this device first. On the machine that made the backup,
                 // that means restoring is still a single tap.
                 val stored = repo.backupPassword.first()
                 val preview = if (stored.isEmpty()) null else withContext(Dispatchers.IO) {
                     try {
-                        BackupManager.inspect(context, bytes, stored)
-                    } catch (e: Exception) {
+                        BackupManager.inspect(context, source, stored)
+                    } catch (_: Throwable) {
                         null
                     }
                 }
@@ -1078,19 +1115,22 @@ fun SettingsScreen(active: Boolean = true) {
                 } else {
                     importPasswordDraft = ""
                     importPasswordError = false
-                    pendingImportBytes = bytes
+                    importPasswordPrompt = true
                 }
             } else {
                 val result = withContext(Dispatchers.IO) {
                     try {
-                        Result.success(BackupManager.inspect(context, bytes, null))
-                    } catch (e: Exception) {
-                        Result.failure(e)
+                        Result.success(BackupManager.inspect(context, source, null))
+                    } catch (t: Throwable) {
+                        Result.failure(t)
                     }
                 }
                 result.fold(
                     onSuccess = { importPreview = it },
-                    onFailure = { backupStatus = S.importFailed(it.message ?: "") }
+                    onFailure = {
+                        backupStatus = S.importFailed(it.message ?: "")
+                        discardImportSource()
+                    }
                 )
             }
         }
@@ -1099,9 +1139,9 @@ fun SettingsScreen(active: Boolean = true) {
     // --- Step 2: the password prompt (only for a backup made with a custom password) ---
     @Composable
     @NonRestartableComposable
-    fun ImportPasswordDialog(bytes: ByteArray) {
+    fun ImportPasswordDialog(file: java.io.File) {
         AlertDialog(
-            onDismissRequest = { pendingImportBytes = null },
+            onDismissRequest = { discardImportSource() },
             title = { Text(S.backupPasswordTitle) },
             text = {
                 Column {
@@ -1126,14 +1166,19 @@ fun SettingsScreen(active: Boolean = true) {
                         scope.launch {
                             val result = withContext(Dispatchers.IO) {
                                 try {
-                                    Result.success(BackupManager.inspect(context, bytes, attempt))
-                                } catch (e: Exception) {
-                                    Result.failure(e)
+                                    // Streaming inspect over the picked file — the password's
+                                    // PBKDF2 cost is paid here once; commit reuses the validated
+                                    // password from the preview for its own pass.
+                                    Result.success(
+                                        BackupManager.inspect(context, BackupManager.fileSource(file), attempt)
+                                    )
+                                } catch (t: Throwable) {
+                                    Result.failure(t)
                                 }
                             }
                             result.fold(
                                 onSuccess = {
-                                    pendingImportBytes = null
+                                    importPasswordPrompt = false
                                     importPreview = it
                                 },
                                 onFailure = { error ->
@@ -1143,8 +1188,8 @@ fun SettingsScreen(active: Boolean = true) {
                                         // only useful thing left to offer is another try.
                                         importPasswordError = true
                                     } else {
-                                        pendingImportBytes = null
                                         backupStatus = S.importFailed(error.message ?: "")
+                                        discardImportSource()
                                     }
                                 }
                             )
@@ -1152,17 +1197,19 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                 ) { Text(S.lockContinue) }
             },
-            dismissButton = { TextButton(onClick = { pendingImportBytes = null }) { Text(S.actionCancel) } }
+            dismissButton = { TextButton(onClick = { discardImportSource() }) { Text(S.actionCancel) } }
         )
     }
-    pendingImportBytes?.let { ImportPasswordDialog(it) }
+    if (importPasswordPrompt) importSourceFile?.let { ImportPasswordDialog(it) }
 
     // --- Step 3: show what's in the file, and let them say no ---
     @Composable
     @NonRestartableComposable
     fun ImportPreviewDialog(preview: BackupManager.BackupPreview) {
         AlertDialog(
-            onDismissRequest = { importPreview = null },
+            // Backing out of the preview abandons the import; drop the file reference with it
+            // (the user's file itself is untouched).
+            onDismissRequest = { importPreview = null; discardImportSource() },
             title = { Text(S.restoreBackupTitle) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -1319,7 +1366,9 @@ fun SettingsScreen(active: Boolean = true) {
                     }
                 ) { Text(S.actionRestore) }
             },
-            dismissButton = { TextButton(onClick = { importPreview = null }) { Text(S.actionCancel) } }
+            dismissButton = {
+                TextButton(onClick = { importPreview = null; discardImportSource() }) { Text(S.actionCancel) }
+            }
         )
     }
     importPreview?.let { ImportPreviewDialog(it) }
