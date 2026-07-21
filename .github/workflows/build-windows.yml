@@ -7,9 +7,14 @@
 #
 # What it does, in order:
 #   1. Compile the optional native libraries on the Windows runner:
-#        • lucent_llama.dll  — the on-device GGUF assistant (llama.cpp, CPU-only), from the SAME C++
-#          the Android build uses (app/src/main/cpp), via desktop/native/CMakeLists.txt.
-#        • lucent_native.dll — the Rust crypto/animation accelerator (rust/), via cargo.
+#        • lucent_llama.dll    — the on-device GGUF assistant (llama.cpp, CPU baseline), from the
+#          SAME C++ the Android build uses (app/src/main/cpp), via desktop/native/CMakeLists.txt.
+#        • lucent_llama_vk.dll — the SAME engine with llama.cpp's Vulkan GPU backend compiled in
+#          (task A4 — Windows GPU support, mirroring Android). Best-effort: it needs the Vulkan
+#          SDK, which is installed below with continue-on-error; if the SDK or this build fails,
+#          the app simply ships CPU-only and the in-app GPU switch falls back to CPU. At runtime,
+#          NativeLoader loads the _vk DLL only on machines that actually have vulkan-1.dll.
+#        • lucent_native.dll   — the Rust crypto/animation accelerator (rust/), via cargo.
 #      Both are OPTIONAL: the app has Kotlin/JCE fallbacks for every path they accelerate, so these
 #      steps are `continue-on-error` — a first run still produces a working .exe even if a native
 #      build needs a follow-up fix. When they succeed the DLLs are copied to the classpath resource
@@ -63,10 +68,12 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-      # ---- lucent_llama.dll (llama.cpp, CPU-only) ----
+      # ---- lucent_llama.dll (llama.cpp, CPU baseline) ----
       # continue-on-error: an on-device-model build failure must not block the whole installer — the
       # app runs fine without it (the local model just stays unavailable until the DLL is fixed).
-      - name: Build lucent_llama.dll (CMake, CPU-only)
+      # This CPU build runs FIRST and is never mixed with the Vulkan build below, so a Vulkan
+      # failure can only cost the GPU variant, never the baseline engine.
+      - name: Build lucent_llama.dll (CMake, CPU baseline)
         continue-on-error: true
         shell: pwsh
         run: |
@@ -79,6 +86,46 @@ jobs:
             Write-Host "Copied $($dll.FullName)"
           } else {
             Write-Warning "lucent_llama.dll not found; the packaged app will run without the on-device model."
+          }
+
+      # ---- Vulkan SDK, for the optional GPU-enabled engine build (task A4) ----
+      # Pinned LunarG SDK, installed silently the same way llama.cpp's own Windows CI does it.
+      # continue-on-error: no SDK just means no GPU variant this round — never a failed workflow.
+      # The installer writes to C:\VulkanSDK\<version>; VULKAN_SDK is exported for later steps via
+      # GITHUB_ENV because the machine-wide variable the installer sets isn't visible to a job that
+      # is already running.
+      - name: Install Vulkan SDK
+        continue-on-error: true
+        shell: pwsh
+        env:
+          VULKAN_VERSION: 1.4.321.1
+        run: |
+          $installer = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          curl.exe -sSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/VulkanSDK-$env:VULKAN_VERSION-Installer.exe"
+          Start-Process -Wait -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install"
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---- lucent_llama_vk.dll (llama.cpp, Vulkan GPU backend) ----
+      # A SECOND build of the same engine, in its own build directory, with the GPU backend
+      # compiled in. Also continue-on-error, and it checks for the SDK itself, so every failure
+      # mode ends the same harmless way: the app ships with only the CPU engine.
+      - name: Build lucent_llama_vk.dll (CMake, Vulkan GPU backend)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          if (-not $env:VULKAN_SDK -or -not (Test-Path $env:VULKAN_SDK)) {
+            Write-Warning "Vulkan SDK unavailable; skipping the GPU engine build (the CPU engine above still ships)."
+            exit 0
+          }
+          cmake -S desktop/native -B desktop/native/build-vk -A x64 -DCMAKE_BUILD_TYPE=Release -DLUCENT_ENABLE_VULKAN=ON
+          cmake --build desktop/native/build-vk --config Release --parallel
+          $dll = Get-ChildItem -Recurse -Path desktop/native/build-vk -Filter lucent_llama.dll | Select-Object -First 1
+          if ($dll) {
+            New-Item -ItemType Directory -Force -Path desktop/src/main/resources/native | Out-Null
+            Copy-Item $dll.FullName desktop/src/main/resources/native/lucent_llama_vk.dll -Force
+            Write-Host "Copied $($dll.FullName) as lucent_llama_vk.dll"
+          } else {
+            Write-Warning "Vulkan engine build produced no DLL; the app ships CPU-only (the GPU switch will fall back to CPU)."
           }
 
       # ---- lucent_native.dll (Rust accelerator) ----
