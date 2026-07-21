@@ -189,12 +189,25 @@ fun GlassButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     icon: ImageVector? = null,
-    danger: Boolean = false
+    danger: Boolean = false,
+    // Opt-in smaller footprint: less padding, smaller label and icon. Default false so every
+    // existing caller keeps the standard size; only a deliberately secondary action (the "attach
+    // file" button in [AttachmentSection]) turns this on so it sits *below* the primary button in
+    // the visual hierarchy rather than looming larger than it.
+    compact: Boolean = false
 ) {
     val onGradient = LocalOnGradient.current
     val context = androidx.compose.ui.platform.LocalContext.current
     val shape = RoundedCornerShape(percent = 50)
     val glassDark = isDarkGlass()
+
+    // Compact shrinks every dimension of the button together, so it reads as the same control at a
+    // smaller size rather than a differently proportioned one.
+    val hPad = if (compact) 16.dp else 22.dp
+    val vPad = if (compact) 8.dp else 13.dp
+    val labelSize = if (compact) 13.sp else 15.sp
+    val iconSize = if (compact) 16.dp else 18.dp
+    val iconGap = if (compact) 6.dp else 8.dp
 
     // Danger is a solid slab, not a tint. DANGER_RED is the same hue the old wash used, at full
     // opacity, and it is identical on both themes on purpose: a destructive control should not
@@ -222,15 +235,15 @@ fun GlassButton(
                 Haptics.tick(context)
                 onClick()
             }
-            .padding(horizontal = 22.dp, vertical = 13.dp),
+            .padding(horizontal = hPad, vertical = vPad),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
         if (icon != null) {
-            Icon(icon, contentDescription = null, tint = label.copy(alpha = label.alpha * fade), modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
+            Icon(icon, contentDescription = null, tint = label.copy(alpha = label.alpha * fade), modifier = Modifier.size(iconSize))
+            Spacer(modifier = Modifier.width(iconGap))
         }
-        Text(text, color = label.copy(alpha = label.alpha * fade), fontSize = 15.sp)
+        Text(text, color = label.copy(alpha = label.alpha * fade), fontSize = labelSize)
     }
 }
 
@@ -267,8 +280,10 @@ fun AttachmentSection(
         GlassButton(
             text = com.lucent.app.i18n.S.attachFile,
             icon = Icons.Default.AttachFile,
-            // Compact (wrap-content) so it reads as the smaller, secondary action beneath the wide
-            // primary Add button — the reverse of the two sitting at the same width.
+            // Compact so this optional "attach file" action is visibly the smaller, secondary control
+            // sitting beneath the larger primary Add/Save button — the two sizes are deliberately
+            // swapped from before, when the attachment button was the bigger of the pair.
+            compact = true,
             onClick = onPick
         )
         if (attachments.isNotEmpty()) {

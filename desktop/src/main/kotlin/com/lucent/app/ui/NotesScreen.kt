@@ -897,9 +897,18 @@ fun NotesScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    Button(onClick = { saveNote() }) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Text(if (editingId != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addNoteBtn)
+                    // Enlarged so the primary action is the biggest control in this group. Its size
+                    // and the smaller "attach file" button above are the reverse of before, when the
+                    // optional attachment button was larger than the button that actually saves.
+                    Button(
+                        onClick = { saveNote() },
+                        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 14.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(24.dp))
+                        Text(
+                            if (editingId != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addNoteBtn,
+                            fontSize = 16.sp
+                        )
                     }
                 }
             }

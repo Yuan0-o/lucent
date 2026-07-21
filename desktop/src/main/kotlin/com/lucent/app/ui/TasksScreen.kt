@@ -817,9 +817,18 @@ fun TasksScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    Button(onClick = { saveTask() }) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Text(if (editingTask != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addTaskBtn)
+                    // Enlarged so the primary action is the biggest control in this group. Its size
+                    // and the smaller "attach file" button above are the reverse of before, when the
+                    // optional attachment button was larger than the button that actually saves.
+                    Button(
+                        onClick = { saveTask() },
+                        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 14.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(24.dp))
+                        Text(
+                            if (editingTask != null) " " + com.lucent.app.i18n.S.saveChanges else " " + com.lucent.app.i18n.S.addTaskBtn,
+                            fontSize = 16.sp
+                        )
                     }
                 }
             }

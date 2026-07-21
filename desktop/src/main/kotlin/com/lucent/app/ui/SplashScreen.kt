@@ -21,15 +21,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalInspectionMode
@@ -38,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.sin
 
 /**
@@ -57,8 +57,8 @@ object AppReady {
 }
 
 /**
- * The launch animation: two hands wave hello, then turn into liquid glass. (Desktop copy of the
- * shared splash — identical to :app except it drops Android's status-bar inset.)
+ * The launch animation: a little cat waves hello, gives a playful blink, then turns to liquid glass.
+ * (Desktop copy of the shared splash — identical to :app except it drops Android's status-bar inset.)
  *
  * ### What this is actually for
  *
@@ -69,27 +69,30 @@ object AppReady {
  *
  * So this fills it with something. Crucially it fills it *without adding to it*: the splash is drawn
  * **over** the real app, which composes underneath at the same time. The waiting that was already
- * happening now happens behind an animation, and by the time the hands fade the app behind it is
+ * happening now happens behind an animation, and by the time the cat fades the app behind it is
  * built and ready.
  *
  * ### The animation
  *
- * About seven and a half seconds, in four movements:
+ * About seven and a half seconds, in five movements:
  *
- *  1. **Arrive** (0–0.7s) — the hands pop in with a slight overshoot, the way something alive enters.
- *  2. **Wave** (0.7–3.3s) — both hands swing about their wrists, a cheeky little "hello"; they mirror
- *     each other so the greeting reads as two-handed and symmetric rather than a single hand waving.
- *  3. **Become glass** (3.3–6.6s) — the solid hands cross-fade into the app's own material: a
- *     translucent pane tinted by the live palette, a bright rim, and a specular highlight that sweeps
- *     across them as they change. It also *wobbles* — squashing and stretching, strongest at
- *     the midpoint and settling to nothing — which is what makes it read as having briefly turned to
- *     liquid rather than simply having faded. This is the part worth lingering on, so it gets the
- *     largest share of the (now longer) running time.
- *  4. **Leave** (6.6–7.7s) — it floats up and dissolves, and the app is already there behind it.
+ *  1. **Arrive** (0–0.7s) — the cat pops in with a slight overshoot, the way something alive enters.
+ *  2. **Wave** (0.7–2.5s) — its two round paws swing about where they join the body, a cheeky
+ *     little "hello"; they mirror each other so the greeting reads as two-pawed and symmetric, and
+ *     they settle back to rest at the end of the swing.
+ *  3. **Blink** (2.6–3.2s) — the eyes squeeze shut into two happy little arcs and open again, a
+ *     playful beat before the change.
+ *  4. **Become glass** (3.3–6.6s) — the solid cat cross-fades into the app's own material: a
+ *     translucent pane tinted by the live palette, a bright rim, and a specular highlight — while
+ *     keeping its shape and face, so it is recognisably the *same* cat rendered in glass. It also
+ *     *wobbles* — squashing and stretching, strongest at the midpoint and settling to nothing —
+ *     which is what makes it read as having briefly turned to liquid rather than simply faded. This
+ *     is the part worth lingering on, so it gets the largest share of the running time.
+ *  5. **Leave** (6.6–7.7s) — it floats up and dissolves, and the app is already there behind it.
  *
- * The hands are drawn with plain Canvas primitives — no image asset, no vector drawable — so they are a
+ * The cat is drawn with plain Canvas primitives — no image asset, no vector drawable — so it is a
  * few hundred bytes of code, scales to any screen without a folder of densities, and can be morphed
- * arbitrarily, which is the entire trick in movement 3.
+ * arbitrarily, which is the entire trick in movement 4.
  *
  * ### Getting out of it
  *
@@ -97,7 +100,7 @@ object AppReady {
  * control, or a back press, finishes it immediately** — and the app behind is already composed, so
  * skipping is instant rather than a shortcut into more waiting. A stray tap anywhere else does
  * nothing, so the animation can't be cut short by accident. Completion is also driven by a plain
- * `delay`, not by the frame clock that drives the drawing: if that clock were ever starved the hands
+ * `delay`, not by the frame clock that drives the drawing: if that clock were ever starved the cat
  * would freeze, and a frozen splash that never ends is an app that never starts. The animation may
  * stall; the launch may not.
  */
@@ -106,10 +109,10 @@ fun LucentSplash(
     paletteColors: List<Color>,
     backdropColor: Color,
     onFinished: () -> Unit,
-    // Whether the drifting blob background animates behind the hands. Passed straight through to
+    // Whether the drifting blob background animates behind the cat. Passed straight through to
     // [FluidGlassBackground] so the splash obeys the SAME "drifting background" setting the app
     // does: off in Settings means off here too, from the very first frame — never blobs during the
-    // hands and stillness after it.
+    // cat and stillness after it.
     backgroundAnimated: Boolean = true
 ) {
     val onGradient = LocalOnGradient.current
@@ -176,11 +179,21 @@ fun LucentSplash(
         val overshoot = sin(enter * PI.toFloat()) * 0.06f                    // brief bulge past 1.0
         val scaleIn = 0.62f + 0.38f * enterEased + overshoot
 
-        // Wave: a few swings, tapering off as the morph begins.
-        val waveT = ((t - ENTER_MS) / (MORPH_START_MS - ENTER_MS)).coerceIn(0f, 1f)
-        val waveAngle = sin(waveT * WAVE_CYCLES * 2f * PI.toFloat()) * 24f * (1f - waveT * 0.35f)
+        // Wave: a few paw swings between the entrance and the blink. WAVE_CYCLES is a whole number so
+        // the swing lands back at rest (angle 0) exactly when the wave window ends — the paws don't
+        // freeze mid-lift before the blink.
+        val waveT = ((t - ENTER_MS) / (WAVE_END_MS - ENTER_MS)).coerceIn(0f, 1f)
+        val waveAngle = sin(waveT * WAVE_CYCLES * 2f * PI.toFloat()) * 22f * (1f - waveT * 0.25f)
 
-        // Morph: 0 = solid hands, 1 = glass hands.
+        // Blink: 0 -> 1 -> 0 over the blink window (eyes shut, then open). A half-sine gives a smooth
+        // close-and-open; it is 0 everywhere outside the window, so the eyes are wide open during the
+        // wave and again during the glass morph.
+        val blink = if (t in BLINK_START_MS..BLINK_END_MS) {
+            val bt = (t - BLINK_START_MS) / (BLINK_END_MS - BLINK_START_MS)
+            sin(bt * PI.toFloat())
+        } else 0f
+
+        // Morph: 0 = solid cat, 1 = glass cat.
         val glass = ((t - MORPH_START_MS) / (MORPH_END_MS - MORPH_START_MS)).coerceIn(0f, 1f)
         val glassEased = glass * glass * (3f - 2f * glass)
         // Liquid wobble: strongest halfway through the change, nothing at either end.
@@ -192,7 +205,7 @@ fun LucentSplash(
         val alpha = (1f - exitEased).coerceIn(0f, 1f) * enterEased.coerceAtLeast(0.001f)
 
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val unit = size.minDimension / 410f
+            val unit = size.minDimension / 480f
             val cx = size.width / 2f
             val cy = size.height / 2f - 30f * unit - exitEased * 90f * unit
 
@@ -203,13 +216,14 @@ fun LucentSplash(
                     scaleY = unit * scaleIn * (1f - wobble),
                     pivot = Offset.Zero
                 )
-                // Both hands swing about their own wrists — a symmetric, two-handed "hello", rather
-                // than the whole drawing rocking with the wave.
+                // Only the paws swing (about where they meet the body); the rest of the cat holds
+                // still, so the wave reads as a greeting rather than the whole drawing rocking.
             }) {
-                drawHands(
+                drawCat(
                     glass = glassEased,
                     alpha = alpha,
                     waveAngle = waveAngle,
+                    blink = blink,
                     tint = paletteColors.firstOrNull() ?: Color.White
                 )
             }
@@ -248,118 +262,201 @@ fun LucentSplash(
 }
 
 /**
- * Draws two waving hands at the origin, in a space roughly 200 units wide.
+ * Draws the cat at the origin, in a space roughly 240 units wide.
  *
- * Each hand is a rounded palm with four fingers, a thumb and a little sleeve cuff, built from plain
- * Canvas primitives — no image asset, no vector drawable — so it scales to any screen and can be
- * morphed arbitrarily, which is the entire trick in the "become glass" phase.
+ * The whole animal is plain Canvas primitives — rounded rects, ovals, arcs, lines and two small
+ * paths (the ears and the tail) — so it scales to any screen and can be morphed arbitrarily, which
+ * is the entire trick in the "become glass" phase. Everything is drawn back-to-front: tail, ears,
+ * body, then the face, then the two paws on top.
  *
- * The two hands are mirror images and swing about their own wrists in opposite directions, so they
- * read as a symmetric, two-handed "hello" rather than a single hand or two hands swaying in lockstep.
- *
- * [glass] cross-fades between the drawn hands (0) and the glass ones (1) — the same shapes both
- * times, so nothing jumps, only the material. [waveAngle] swings each hand about its wrist, and
- * [tint] is the live palette colour the glass picks up.
+ * [glass] cross-fades between the drawn cat (0) and the glass one (1). The silhouette shapes (body,
+ * ears, paws, tail) pick up a translucent pane, a tint and a bright rim; the face marks (eyes,
+ * nose, mouth) and the belly keep a faint presence so the glass cat is still visibly *this* cat
+ * rather than an anonymous pane. [waveAngle] swings each paw about where it meets the body, [blink]
+ * (0 open, 1 shut) drives the eyes, and [tint] is the live palette colour the glass picks up.
  */
-private fun DrawScope.drawHands(
+private fun DrawScope.drawCat(
     glass: Float,
     alpha: Float,
     waveAngle: Float,
+    blink: Float,
     tint: Color
 ) {
     if (alpha <= 0.001f) return
 
-    val solid = (1f - glass) * alpha
-    val glassy = glass * alpha
+    // Alpha bands. `sol` fades the solid drawing out as glass comes in; `gl` fades the glass in.
+    // `faceA`/`bellyA`/`beanA` never drop all the way to 0 while glassy, so the face, belly and paw
+    // beans survive into the glass form (keeping the cat's original look).
+    val sol = (1f - glass) * alpha
+    val gl = glass * alpha
+    val faceA = max(1f - glass, glass * 0.5f) * alpha
+    val bellyA = max(1f - glass, glass * 0.4f) * alpha
+    val beanA = max(1f - glass, glass * 0.5f) * alpha
 
-    val fur = Color(0xFFFFE9D6)   // warm palm colour
-    val line = Color(0xFF7A6560)  // soft "drawn" outline
-    val cuff = Color(0xFFFF9E7A)  // sleeve band at the wrist
+    val body = Color(0xFFFFFDFC)   // near-white fur
+    val line = Color(0xFF7A6560)   // soft "drawn" outline
+    val earIn = Color(0xFFF5C2D0)  // pink inner ear
+    val eye = Color(0xFF4A3A34)    // soft near-black
+    val cheek = Color(0xFFF6B4C4)  // blush
+    val nose = Color(0xFF966E6C)   // nose + mouth
+    val belly = Color(0xFFF7E6A6)  // pale butter-yellow belly patch
+    val bean = Color(0xFFF3A9BC)   // paw toe beans
+    val whisk = Color(0xFF968078)  // whiskers
 
-    // Two hands. hx = wrist x; dir mirrors the wave so they swing together; mx mirrors the geometry
-    // so both thumbs point outward. Fingers are near-vertical, so mx barely moves them; it mostly
-    // decides which side the thumb sits on.
-    for (hand in 0..1) {
-        val hx = if (hand == 0) -58f else 58f
-        val dir = if (hand == 0) 1f else -1f
-        val mx = if (hand == 0) 1f else -1f
-        val palmLeft = hx - 26f   // palm is symmetric, so this is the same regardless of mx
+    // ---- Tail: a cubic curl on the lower right, behind the body ----
+    val tail = Path().apply {
+        moveTo(62f, 58f)
+        cubicTo(104f, 66f, 112f, 30f, 86f, 20f)
+    }
+    if (sol > 0.002f) {
+        drawPath(tail, line.copy(alpha = sol), style = Stroke(width = 14f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+    if (gl > 0.002f) {
+        drawPath(tail, Color.White.copy(alpha = gl * 0.7f), style = Stroke(width = 14f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        drawPath(tail, tint.copy(alpha = gl * 0.15f), style = Stroke(width = 11f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
 
-        withTransform({ rotate(degrees = waveAngle * dir, pivot = Offset(hx, 78f)) }) {
-            // ---- Sleeve cuff at the wrist ----
-            if (solid > 0.002f) {
-                drawRoundRect(
-                    color = cuff.copy(alpha = solid),
-                    topLeft = Offset(hx - 24f, 58f),
-                    size = Size(48f, 26f),
-                    cornerRadius = CornerRadius(11f, 11f)
-                )
-                drawRoundRect(
-                    color = line.copy(alpha = solid),
-                    topLeft = Offset(hx - 24f, 58f),
-                    size = Size(48f, 26f),
-                    cornerRadius = CornerRadius(11f, 11f),
-                    style = Stroke(width = 3f)
-                )
-            }
+    // ---- Ears: two pointed triangles, drawn before the body so the body covers their base ----
+    for (side in intArrayOf(-1, 1)) {
+        val s = side.toFloat()
+        val ear = Path().apply {
+            moveTo(s * 78f, -46f)
+            lineTo(s * 30f, -66f)
+            lineTo(s * 60f, -122f)
+            close()
+        }
+        if (sol > 0.002f) {
+            drawPath(ear, body.copy(alpha = sol))
+            drawPath(ear, line.copy(alpha = sol), style = Stroke(width = 4f, join = StrokeJoin.Round))
+        }
+        val innerEar = Path().apply {
+            moveTo(s * 68f, -50f)
+            lineTo(s * 38f, -66f)
+            lineTo(s * 60f, -104f)
+            close()
+        }
+        if (sol > 0.002f) drawPath(innerEar, earIn.copy(alpha = sol))
+        if (gl > 0.002f) {
+            // Glass ear: bright rim only, so it reads as glass without a heavy fill.
+            drawPath(ear, Color.White.copy(alpha = gl * 0.75f), style = Stroke(width = 3f, join = StrokeJoin.Round))
+        }
+    }
 
-            // ---- Fingers: four outlined capsules fanning up from the palm top ----
-            // Each capsule is an outline (a hair thicker) with a fill on top, for the "drawn line" look.
-            val fingers = listOf(
-                floatArrayOf(-15f, 6f, -18f, -38f),  // index
-                floatArrayOf(-5f, 4f, -6f, -52f),    // middle (longest)
-                floatArrayOf(6f, 4f, 7f, -48f),      // ring
-                floatArrayOf(15f, 8f, 18f, -32f)     // little
+    // ---- Body: a rounded square (head and body as one marshmallow shape) ----
+    val bodyTL = Offset(-84f, -70f)
+    val bodySize = Size(168f, 156f)
+    val bodyR = CornerRadius(60f, 60f)
+    if (sol > 0.002f) {
+        drawRoundRect(body.copy(alpha = sol), bodyTL, bodySize, bodyR)
+        drawRoundRect(line.copy(alpha = sol), bodyTL, bodySize, bodyR, style = Stroke(width = 4f))
+    }
+    if (gl > 0.002f) {
+        drawRoundRect(Color.White.copy(alpha = gl * 0.16f), bodyTL, bodySize, bodyR)
+        drawRoundRect(tint.copy(alpha = gl * 0.18f), bodyTL, bodySize, bodyR)
+        drawRoundRect(Color.White.copy(alpha = gl * 0.85f), bodyTL, bodySize, bodyR, style = Stroke(width = 3f))
+        // A soft top sheen so the glass body catches the light.
+        drawRoundRect(
+            brush = Brush.verticalGradient(
+                0f to Color.White.copy(alpha = gl * 0.28f),
+                0.6f to Color.Transparent
+            ),
+            topLeft = bodyTL,
+            size = bodySize,
+            cornerRadius = bodyR
+        )
+    }
+
+    // ---- Soft body blush on the lower sides (echoes the reference art) ----
+    if (sol > 0.002f) {
+        for (bx in intArrayOf(-52, 52)) {
+            drawOval(cheek.copy(alpha = sol * 0.18f), Offset(bx - 24f, 34f), Size(48f, 36f))
+        }
+    }
+
+    // ---- Belly patch: a pale-yellow oval ----
+    if (bellyA > 0.002f) {
+        drawOval(belly.copy(alpha = bellyA), Offset(-38f, 30f), Size(76f, 44f))
+    }
+
+    // ---- Feet: two little smile-arcs at the bottom (the "ᵕᵕ") ----
+    for (fx in intArrayOf(-24, 24)) {
+        if (sol > 0.002f) {
+            drawArc(
+                color = line.copy(alpha = sol * 0.85f),
+                startAngle = 20f, sweepAngle = 140f, useCenter = false,
+                topLeft = Offset(fx - 16f, 60f), size = Size(32f, 28f),
+                style = Stroke(width = 3f, cap = StrokeCap.Round)
             )
-            for (fdef in fingers) {
-                val a = Offset(hx + mx * fdef[0], fdef[1])
-                val b = Offset(hx + mx * fdef[2], fdef[3])
-                if (solid > 0.002f) {
-                    drawLine(line.copy(alpha = solid), a, b, 14.2f, StrokeCap.Round)
-                    drawLine(fur.copy(alpha = solid), a, b, 11f, StrokeCap.Round)
-                }
-                if (glassy > 0.002f) {
-                    drawLine(Color.White.copy(alpha = glassy * 0.7f), a, b, 14.2f, StrokeCap.Round)
-                    drawLine(tint.copy(alpha = glassy * 0.20f), a, b, 11f, StrokeCap.Round)
-                }
-            }
+        }
+    }
 
-            // ---- Thumb: an outlined capsule out to the (outer) side ----
-            run {
-                val a = Offset(hx + mx * -20f, 36f)
-                val b = Offset(hx + mx * -44f, 12f)
-                if (solid > 0.002f) {
-                    drawLine(line.copy(alpha = solid), a, b, 15.2f, StrokeCap.Round)
-                    drawLine(fur.copy(alpha = solid), a, b, 12f, StrokeCap.Round)
-                }
-                if (glassy > 0.002f) {
-                    drawLine(Color.White.copy(alpha = glassy * 0.7f), a, b, 15.2f, StrokeCap.Round)
-                    drawLine(tint.copy(alpha = glassy * 0.20f), a, b, 12f, StrokeCap.Round)
-                }
-            }
+    // ---- Cheeks: two blush ovals ----
+    if (sol > 0.002f) {
+        for (cx in intArrayOf(-54, 54)) {
+            drawOval(cheek.copy(alpha = sol), Offset(cx - 17f, 10f), Size(34f, 18f))
+        }
+    }
 
-            // ---- Palm: a rounded rectangle, drawn last so it sits cleanly over the finger roots ----
-            val palmTL = Offset(palmLeft, 2f)
-            val palmSize = Size(52f, 62f)
-            val palmR = CornerRadius(24f, 24f)
-            if (solid > 0.002f) {
-                drawRoundRect(fur.copy(alpha = solid), palmTL, palmSize, palmR)
-                drawRoundRect(line.copy(alpha = solid), palmTL, palmSize, palmR, style = Stroke(width = 3.2f))
+    // ---- Whiskers: three per side, gently fanned ----
+    if (sol > 0.002f) {
+        val whiskerA = whisk.copy(alpha = sol * 0.9f)
+        for (side in intArrayOf(-1, 1)) {
+            val s = side.toFloat()
+            drawLine(whiskerA, Offset(s * 58f, 4f), Offset(s * 96f, -2f), 2f, StrokeCap.Round)
+            drawLine(whiskerA, Offset(s * 58f, 14f), Offset(s * 100f, 14f), 2f, StrokeCap.Round)
+            drawLine(whiskerA, Offset(s * 58f, 24f), Offset(s * 96f, 30f), 2f, StrokeCap.Round)
+        }
+    }
+
+    // ---- Eyes: tall ovals that squash shut on a blink into two happy arcs ----
+    for (ex in intArrayOf(-32, 32)) {
+        val ry = 17f * (1f - 0.86f * blink)
+        if (blink < 0.82f && faceA > 0.002f) {
+            drawOval(eye.copy(alpha = faceA), Offset(ex - 11f, -6f - ry), Size(22f, 2f * ry))
+        }
+        // The happy closed arc fades in as the eye shuts.
+        val arcA = ((blink - 0.35f) / 0.65f).coerceIn(0f, 1f) * faceA
+        if (arcA > 0.02f) {
+            drawArc(
+                color = eye.copy(alpha = arcA),
+                startAngle = 200f, sweepAngle = 140f, useCenter = false,
+                topLeft = Offset(ex - 12f, -15f), size = Size(24f, 18f),
+                style = Stroke(width = 3f, cap = StrokeCap.Round)
+            )
+        }
+    }
+
+    // ---- Nose + omega mouth ----
+    if (faceA > 0.002f) {
+        val noseCol = nose.copy(alpha = faceA)
+        val noseTri = Path().apply {
+            moveTo(-4f, 0f); lineTo(4f, 0f); lineTo(0f, 5f); close()
+        }
+        drawPath(noseTri, noseCol)
+        drawArc(noseCol, 20f, 140f, false, Offset(-9f, 5f), Size(10f, 9f), style = Stroke(width = 3f, cap = StrokeCap.Round))
+        drawArc(noseCol, 20f, 140f, false, Offset(-1f, 5f), Size(10f, 9f), style = Stroke(width = 3f, cap = StrokeCap.Round))
+    }
+
+    // ---- Paws: two round mittens on top, each swinging about where it meets the body ----
+    for (side in intArrayOf(-1, 1)) {
+        val s = side.toFloat()
+        val pivot = Offset(s * 74f, 26f)         // the connection point with the body
+        withTransform({ rotate(degrees = waveAngle * s, pivot = pivot) }) {
+            val center = Offset(s * 98f, 30f)
+            val r = 23f
+            if (sol > 0.002f) {
+                drawCircle(body.copy(alpha = sol), r, center)
+                drawCircle(line.copy(alpha = sol), r, center, style = Stroke(width = 4f))
             }
-            if (glassy > 0.002f) {
-                drawRoundRect(Color.White.copy(alpha = glassy * 0.16f), palmTL, palmSize, palmR)
-                drawRoundRect(tint.copy(alpha = glassy * 0.20f), palmTL, palmSize, palmR)
-                drawRoundRect(Color.White.copy(alpha = glassy * 0.75f), palmTL, palmSize, palmR, style = Stroke(width = 2.8f))
-                // A soft top-left sheen so the glass palm catches the light.
-                drawRoundRect(
-                    brush = Brush.verticalGradient(
-                        0f to Color.White.copy(alpha = glassy * 0.28f),
-                        0.6f to Color.Transparent
-                    ),
-                    topLeft = palmTL,
-                    size = palmSize,
-                    cornerRadius = palmR
-                )
+            if (gl > 0.002f) {
+                drawCircle(Color.White.copy(alpha = gl * 0.16f), r, center)
+                drawCircle(Color.White.copy(alpha = gl * 0.85f), r, center, style = Stroke(width = 3f))
+            }
+            // Two toe beans near the top of the paw.
+            if (beanA > 0.002f) {
+                for (bx in floatArrayOf(-8f, 8f)) {
+                    drawCircle(bean.copy(alpha = beanA), 3.5f, Offset(center.x + bx, center.y - 9f))
+                }
             }
         }
     }
@@ -367,15 +464,16 @@ private fun DrawScope.drawHands(
 
 // ---- Timings, in milliseconds ----
 // One place to retune the whole sequence; every phase above is expressed against these rather than
-// against hard-coded numbers scattered through the drawing code. Lengthened to roughly 1.5x of the
-// original, with the glass transformation given proportionally more of that time (it is the part
-// worth lingering on).
-// E6: overall launch-animation speed. A factor below 1 makes the whole sequence quicker; every
+// against hard-coded numbers scattered through the drawing code.
+// SPEED: overall launch-animation speed. A factor below 1 makes the whole sequence quicker; every
 // duration below is multiplied by it, so the relative timing of the phases is preserved exactly.
 private const val SPEED = 0.85f
 private const val TOTAL_MS = 7700f * SPEED
 private const val ENTER_MS = 700f * SPEED
+private const val WAVE_END_MS = 2500f * SPEED      // paws finish waving here (before the blink)
+private const val BLINK_START_MS = 2600f * SPEED   // eyes begin to close
+private const val BLINK_END_MS = 3200f * SPEED     // eyes fully open again
 private const val MORPH_START_MS = 3300f * SPEED
 private const val MORPH_END_MS = 6600f * SPEED
 private const val EXIT_START_MS = 6600f * SPEED
-private const val WAVE_CYCLES = 4.5f // a count of wave swings, not a duration — left unscaled
+private const val WAVE_CYCLES = 3f // a whole number of wave swings, so the paws end at rest — not a duration
