@@ -2175,7 +2175,7 @@ object Ja : Tr() {
     override fun a11yVersionHistory(count: Int): String = "バージョン履歴（${count}）"
     override fun createdOn(at: String): String = "作成 ${at}"
     override fun completedOn(at: String): String = "完了 ${at}"
-    override val reminderOn: String = "リマインダー オン"
+    override val reminderOn: String = "リマインダーオン"
     override val selectNotes: String = "メモを選択"
     override val selectTasks: String = "タスクを選択"
     override val a11yCancelSelection: String = "選択を解除"
