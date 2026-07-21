@@ -2,6 +2,7 @@ package com.lucent.app.ui
 
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.lucent.app.AppScope
@@ -31,6 +32,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Owns the assistant's send/stream lifecycle *outside* of any composable, so a reply keeps
@@ -70,21 +73,34 @@ object AssistantController {
     private const val MAX_TOOL_ROUNDS = 6
 
     // ---- Observable UI state (read from AssistantScreen composition) ----
-    var sending by mutableStateOf(false)
-        private set
-    // True while the assistant is working but hasn't started revealing text yet — drives the
-    // "[name] is thinking…" bubble (issue 14). Turns false the instant the typewriter begins, so
-    // there's no overlap between the animation and the real reply.
-    var thinking by mutableStateOf(false)
-        private set
-    // True only while the on-device model is being loaded into memory (the slow first load of a
-    // multi-gigabyte file). Drives a distinct "loading the model…" line so the wait is visible and
-    // never reads as a hang. Separate from [thinking] so the UI can say *why* it is waiting.
-    var loadingModel by mutableStateOf(false)
-        private set
-    var streamingText by mutableStateOf<String?>(null)
-        private set
+    //
+    // Live turn state (sending / thinking / streaming / loading) is PER TURN now — several
+    // conversations can generate at once — so the screen reads it through the *For(conversationId)
+    // helpers below, which look the turn up in the registry. The lookup by id is itself the
+    // isolation: a view can only ever see the turn that belongs to the conversation it shows.
+
+    /** True while ANY reply is generating, in any conversation. The lifecycle and exit paths read
+     *  this; the per-conversation state a screen shows comes from the *For helpers instead. */
+    val sending: Boolean get() = turns.isNotEmpty()
+
+    /** Whether a reply is generating in [conversationId] — drives that conversation's Stop/Send button. */
+    fun isGenerating(conversationId: Long?): Boolean = turnFor(conversationId) != null
+
+    /** The live typewriter text of [conversationId]'s in-flight reply, if any. */
+    fun streamingTextFor(conversationId: Long?): String? = turnFor(conversationId)?.streamingText
+
+    /** Whether [conversationId]'s in-flight reply is still thinking (no text revealed yet). */
+    fun thinkingFor(conversationId: Long?): Boolean = turnFor(conversationId)?.thinking == true
+
+    /** Whether [conversationId]'s in-flight LOCAL reply is waiting on the model load. */
+    fun loadingModelFor(conversationId: Long?): Boolean = turnFor(conversationId)?.loadingModel == true
+
     var errorText by mutableStateOf("")
+        private set
+    // The conversation the inline error banner belongs to. With several turns possible, a
+    // background turn's failure must show up in ITS conversation, not under whichever chat the
+    // user happens to be reading; the screen compares this id before rendering [errorText].
+    var errorConversationId by mutableStateOf<Long?>(null)
         private set
     // A genuine connectivity failure (not an HTTP/status error), surfaced as a modal rather than an
     // inline banner (issue 19). Null when there's nothing to show.
@@ -122,24 +138,54 @@ object AssistantController {
         private set
     private var messagesJob: Job? = null
 
-    // The in-flight generation job (for the Stop button, issue 14) and bookkeeping so a stop can
-    // persist whatever was produced without the normal completion path also saving it.
-    private var sendJob: Job? = null
-    @Volatile private var turnPersisted = false
-    private var activeConversationId: Long? = null
+    // ---- The turn registry ----
+    //
+    // Every in-flight reply is one [Turn] here; each owns its coroutine, its typewriter, and its
+    // bookkeeping outright, which is what makes several conversations generating at once safe —
+    // turns cannot see, let alone clobber, each other's state. A snapshot-state list so
+    // composition observes membership; compound mutations go through [turnsGuard] so the
+    // "first turn in / last turn out" foreground-service decisions are exact.
+    private val turns = mutableStateListOf<Turn>()
+    private val turnsGuard = Any()
+
+    private fun turnFor(conversationId: Long?): Turn? =
+        turns.firstOrNull { it.conversationId == conversationId }
+
+    private fun localTurnOrNull(): Turn? = turns.firstOrNull { it.isLocal }
+
+    private fun registerTurn(turn: Turn, assistantName: String) {
+        synchronized(turnsGuard) {
+            val first = turns.isEmpty()
+            turns.add(turn)
+            // The keep-alive service spans ALL turns: up with the first, down with the last.
+            if (first) startGenerationService(assistantName)
+        }
+    }
+
+    private fun unregisterTurn(turn: Turn) {
+        synchronized(turnsGuard) {
+            turns.remove(turn)
+            if (turns.isEmpty()) stopGenerationService()
+        }
+    }
 
     // Held so background work (haptics, the foreground service) has an application context even when
     // no composable is currently alive.
     private var appContextRef: Context? = null
 
-    // The confirm modal's answer is delivered back into the parked coroutine through this.
-    private var confirmationDeferred: CompletableDeferred<ConfirmationOutcome>? = null
+    // Several turns can want a confirmation at once now; the modal is one. Turns take this mutex
+    // for the whole ask-and-wait, so questions are posed one at a time in arrival order, and
+    // [confirmingTurn] records whose question is on screen so an answer (or a stop) can never be
+    // delivered to the wrong turn.
+    private val confirmationMutex = Mutex()
+    @Volatile private var confirmingTurn: Turn? = null
 
     // The conversation currently shown/active. Null until resolved on first load (we pick the
     // most-recent conversation, or lazily create one when the first message is sent). Everything
     // the assistant screen renders and everything send() writes is scoped to this id.
     var currentConversationId by mutableStateOf<Long?>(null)
         private set
+
 
     // The list of all conversations, for the switcher UI. Most-recent first.
     var conversations by mutableStateOf<List<ChatConversation>>(emptyList())
@@ -193,13 +239,15 @@ object AssistantController {
      * screen would keep observing a conversation id that no longer exists.
      */
     fun onAllChatsCleared(appContext: Context) {
-        // Every row has just been deleted, so an in-flight reply would insert itself into a table
-        // that was emptied a moment ago — a message reappearing in a history the user just cleared.
-        // Stop it silently and land on the fresh greeting (task 4).
-        if (sending) stopGeneration(silent = true)
+        // Every row has just been deleted, so any in-flight reply — in ANY conversation — would
+        // insert itself into a table that was emptied a moment ago: a message reappearing in a
+        // history the user just cleared. Stop them all silently and land on the fresh greeting
+        // (task 4).
+        stopAllGeneration(silent = true)
         val db = AppDatabase.getInstance(appContext.applicationContext)
         currentConversationId = null
-        errorText = ""
+        // Every conversation an error could have belonged to is gone; clear unconditionally.
+        clearError()
         observeCurrentConversation(db)
     }
 
@@ -238,26 +286,54 @@ object AssistantController {
      * by pointing at "no conversation" (id null). The row is created lazily by [send] when the
      * first message is actually sent. That's what prevents a pile of empty "New conversation"
      * entries from accumulating when the user taps + repeatedly or opens a new chat without typing
-     * (issue 12). No-op while a reply is streaming, so we never split a turn.
+     * (issue 12). A LOCAL reply in flight is stopped first; a CLOUD reply keeps generating in the
+     * background and lands in its own conversation when it finishes.
      */
     fun startNewConversation(appContext: Context) {
-        // A reply still in flight is interrupted rather than blocking the new chat (task 4). The old
-        // `if (sending) return` made the + button silently do nothing while the assistant was busy,
-        // which is indistinguishable from the button being broken — and it was most likely to be
-        // pressed precisely when a reply was dragging on and the user wanted out of it.
-        if (sending) stopGeneration(silent = true)
+        // A LOCAL reply still in flight is interrupted rather than blocking the new chat (task 4):
+        // the old `if (sending) return` made the + button silently do nothing while the assistant
+        // was busy, and a multi-gigabyte model decoding for a chat the user is leaving is the most
+        // expensive thing this app can do to a device. CLOUD replies are different: they cost
+        // nothing locally while they wait on the network and the requests are already paid for, so
+        // every one of them keeps generating in the background and lands in its own conversation
+        // when it finishes — each turn owns its state outright and the screen looks turns up by
+        // conversation id, so nothing can leak into the fresh chat.
+        localTurnOrNull()?.let { stopTurn(it, silent = true) }
         val db = AppDatabase.getInstance(appContext.applicationContext)
         currentConversationId = null
-        errorText = ""
+        // Errors are tagged with the conversation they belong to and shown only there, so an error
+        // from some other chat's turn must SURVIVE this navigation for the user to find. The one
+        // error a fresh chat can own is one tagged null (a turn that failed before its
+        // conversation row existed) — that is the only one starting another fresh chat clears.
+        if (errorConversationId == null) clearError()
         observeCurrentConversation(db)
     }
 
-    /** Switch the visible conversation to [id]. */
+    /**
+     * Switch the visible conversation to [id].
+     *
+     * A LOCAL reply in flight is stopped first (the old `if (sending) return` silently ignored the
+     * tap, which read as the switcher being broken): its partial text plus the "Reply stopped."
+     * marker are written into the conversation it belongs to, so nothing is lost and nothing leaks
+     * into the one being opened. CLOUD replies are left generating in the background instead —
+     * each lands in its own conversation when it finishes, and switching into a conversation whose
+     * reply is still in flight simply shows it generating.
+     */
     fun switchConversation(appContext: Context, id: Long) {
-        if (sending) return
+        // A LOCAL reply only ever generates in the conversation on screen, so re-selecting that
+        // same conversation is not a departure and must not stop it. Anywhere else is.
+        val localTurn = localTurnOrNull()
+        if (localTurn != null) {
+            if (localTurn.conversationId == id) return
+            stopTurn(localTurn)
+        }
         val db = AppDatabase.getInstance(appContext.applicationContext)
         currentConversationId = id
-        errorText = ""
+        // Deliberately NOT clearing errorText here (the old single-turn code did): errors are
+        // tagged with the conversation they belong to and rendered only there, so clearing on
+        // every switch would wipe a background turn's failure before the user ever switched back
+        // to see it. The banner clears when its conversation is sent in again, when the screen is
+        // left, or when its conversation is deleted.
         observeCurrentConversation(db)
     }
 
@@ -272,14 +348,16 @@ object AssistantController {
      * deleting the chat you were reading dropped you into an unrelated old one.
      */
     fun deleteConversation(appContext: Context, id: Long) {
-        // Interrupt first (task 4): a reply generating into a conversation that is about to be
-        // deleted has nowhere to land, and blocking the delete until it finished meant the one
-        // action that ends a runaway reply was disabled by the runaway reply.
-        if (sending) stopGeneration(silent = true)
+        // Interrupt only the reply generating INTO the conversation being deleted (task 4) — even
+        // one running in the background for it — because its target is about to vanish. Silent,
+        // since the row a marker would land in is deleted a moment later. Replies generating into
+        // OTHER conversations, local or cloud, are left alone: deleting an unrelated chat is no
+        // reason to lose an answer.
+        turnFor(id)?.let { stopTurn(it, silent = true) }
         val db = AppDatabase.getInstance(appContext.applicationContext)
-        // Clear any shown error at once so it disappears together with the deleted chat, rather
-        // than lingering until the user leaves and re-enters the page (issue 14).
-        errorText = ""
+        // An error belonging to the deleted chat disappears together with it (issue 14); one
+        // belonging to some other conversation survives, to be seen there.
+        if (errorConversationId == id) clearError()
         scope.launch {
             db.chatDao().clearConversation(id)
             db.chatConversationDao().getById(id)?.let { db.chatConversationDao().delete(it) }
@@ -305,7 +383,10 @@ object AssistantController {
         }
     }
 
-    fun clearError() { errorText = "" }
+    fun clearError() {
+        errorText = ""
+        errorConversationId = null
+    }
 
     /** Dismiss the network-error modal (issue 19). */
     fun clearNetworkError() { networkErrorMessage = null }
@@ -317,44 +398,69 @@ object AssistantController {
      */
     fun resolveConfirmation(approved: Boolean, editedValue: String? = null) {
         pendingConfirmation = null
-        confirmationDeferred?.complete(ConfirmationOutcome(approved, editedValue))
-        confirmationDeferred = null
+        val turn = confirmingTurn
+        confirmingTurn = null
+        turn?.confirmationDeferred?.complete(ConfirmationOutcome(approved, editedValue))
+        turn?.confirmationDeferred = null
     }
 
     /**
-     * Interrupt an in-progress reply. Cancels the generation, unblocks any confirmation it was
-     * waiting on, and — so the thread isn't left with a dangling user message — saves whatever text
-     * had been produced so far, unless the normal path already saved a reply.
+     * Interrupt the reply generating in the conversation currently ON SCREEN — the Stop button's
+     * semantics now that several conversations can generate at once. [stopAllGeneration] is the
+     * exit path's stop-everything variant; [stopTurn] is the shared core.
+     */
+    fun stopGeneration(reason: String? = null, silent: Boolean = false) {
+        turnFor(currentConversationId)?.let { stopTurn(it, reason, silent) }
+    }
+
+    /**
+     * Stop every in-flight reply, each persisting its partial into its OWN conversation. Used when
+     * the whole app is going away (the exit warning's "stop and exit"), where leaving background
+     * turns running would just lose their partials to process death, unmarked.
+     */
+    fun stopAllGeneration(reason: String? = null, silent: Boolean = false) {
+        turns.toList().forEach { stopTurn(it, reason, silent) }
+    }
+
+    /**
+     * Interrupt one in-progress reply. Cancels its coroutine, unblocks any confirmation it was
+     * waiting on, and — so its thread isn't left with a dangling user message — saves whatever text
+     * it had produced so far into ITS conversation, unless the normal path already saved a reply.
      *
-     * Called from three places now: the Stop button, the "stop and exit" choice in the exit warning,
-     * and the app going to the background with background replies switched off (task 2).
+     * Called from the Stop button (via [stopGeneration]), the "stop and exit" choice in the exit
+     * warning (via [stopAllGeneration]), the app going to the background with background replies
+     * switched off, and the conversation-lifecycle paths (new / switch / delete / clear-all).
      * [reason] is the line appended to the saved turn so the conversation says what happened; when
      * null it falls back to the plain "Reply stopped." marker.
      */
-    fun stopGeneration(reason: String? = null, silent: Boolean = false) {
-        if (!sending) return
-        // Unblock a parked confirmation first so the coroutine can unwind cleanly.
-        confirmationDeferred?.complete(ConfirmationOutcome(approved = false))
-        confirmationDeferred = null
-        pendingConfirmation = null
+    private fun stopTurn(turn: Turn, reason: String? = null, silent: Boolean = false) {
+        // Unblock a parked confirmation first so the coroutine can unwind cleanly; if this turn's
+        // question is the one on screen, take the modal down with it. (A turn still queued on the
+        // confirmation mutex is unblocked by the job cancellation below instead.)
+        turn.confirmationDeferred?.complete(ConfirmationOutcome(approved = false))
+        turn.confirmationDeferred = null
+        if (confirmingTurn === turn) {
+            confirmingTurn = null
+            pendingConfirmation = null
+        }
 
         // If the turn is running on the on-device model, flip its stop flag too: the native decode
         // loop doesn't hit coroutine suspension points, so cancelling the Job alone would let it
         // keep spending CPU until the token cap. This makes it return within one token (task 1's
-        // "must not lag" also applies to stopping). No-op when nothing local is generating.
-        com.lucent.app.local.LocalLlm.stop()
+        // "must not lag" also applies to stopping). Only a LOCAL turn ever needs this — and only
+        // one local turn can exist at a time, so the flag cannot hit a bystander.
+        if (turn.isLocal) com.lucent.app.local.LocalLlm.stop()
 
-        val convId = activeConversationId
+        val convId = turn.conversationId
         val ctx = appContextRef
-        val partial = synchronized(lock) { buffer.toString() }
-        val cleaned = deRobotify(partial).trim()
+        val cleaned = deRobotify(turn.snapshotBuffer()).trim()
 
-        sendJob?.cancel()
-        sendJob = null
-        finishStream()
-        thinking = false
-        sending = false
-        stopGenerationService()
+        turn.job?.cancel()
+        turn.job = null
+        turn.finishStream()
+        turn.thinking = false
+        turn.loadingModel = false
+        unregisterTurn(turn)
 
         // Write the stop into the conversation, always — including when not one token had been
         // produced yet (task 2).
@@ -368,18 +474,18 @@ object AssistantController {
         // So there is now always a turn, and it always says so in words. `reason` carries the
         // specific cause when there is one worth naming — being backgrounded, in particular, needs
         // to point at the setting that would have prevented it.
-        // A SILENT stop leaves nothing behind (task 4). The three callers that ask for one are all
-        // about to make the conversation itself disappear — starting a new chat, deleting this one,
-        // wiping every chat — so a "Reply stopped." marker would either be written into a row that
-        // is deleted a millisecond later, or, worse, land in the fresh empty conversation the user
-        // was trying to get to. Nothing to explain, so nothing is said.
+        // A SILENT stop leaves nothing behind (task 4). The callers that ask for one are all about
+        // to make the turn's conversation itself disappear — starting a new chat, deleting that
+        // conversation, wiping every chat — so a "Reply stopped." marker would be written into a
+        // row that is deleted (or abandoned) a moment later. Nothing to explain, so nothing is
+        // said.
         if (silent) {
-            turnPersisted = true
+            turn.turnPersisted = true
             return
         }
         val marker = reason ?: com.lucent.app.i18n.S.replyStopped
-        if (!turnPersisted && convId != null && ctx != null) {
-            turnPersisted = true
+        if (!turn.turnPersisted && convId != null && ctx != null) {
+            turn.turnPersisted = true
             val db = AppDatabase.getInstance(ctx)
             val body = if (cleaned.isBlank()) marker else "$cleaned\n\n$marker"
             val tokens = TokenEstimator.estimate(body)
@@ -400,8 +506,10 @@ object AssistantController {
      * cutting one off would waste a request the user has already paid for.
      */
     fun onAppBackgrounded(backgroundRepliesEnabled: Boolean) {
-        if (!sending || !localTurnInFlight || backgroundRepliesEnabled) return
-        stopGeneration(com.lucent.app.i18n.S.replyStoppedBackground)
+        if (backgroundRepliesEnabled) return
+        // Only a LOCAL turn is stopped by leaving the app; cloud turns — foreground or background
+        // — are never touched, exactly as before.
+        localTurnOrNull()?.let { stopTurn(it, reason = com.lucent.app.i18n.S.replyStoppedBackground) }
     }
 
     /**
@@ -409,8 +517,7 @@ object AssistantController {
      * lifecycle and exit paths, which have to treat local and cloud replies differently: only the
      * local one is holding gigabytes of RAM and only it is stopped by leaving the app.
      */
-    var localTurnInFlight: Boolean = false
-        private set
+    val localTurnInFlight: Boolean get() = turns.any { it.isLocal }
 
     // The full parameter set of the most recent send(), kept so the network-error modal can offer
     // a one-tap Retry (ported from the second assistant variant). By the time a connection failure
@@ -426,31 +533,168 @@ object AssistantController {
         val useLocalGpu: Boolean = false
     )
     private var lastSend: LastSend? = null
+    // The conversation the failed turn belonged to, captured together with [lastSend] at failure
+    // time (see fail), so Retry re-runs into that conversation even if the user has since moved
+    // elsewhere. With several turns possible, "the most recent send" and "the send that failed"
+    // are no longer the same thing — the pairing is made where the failure is known.
+    private var lastSendConversationId: Long? = null
 
     /** Whether the typewriter's per-character tick and finish pulse fire (a2's Behaviour toggle). */
     @Volatile private var typingHapticsOn = true
 
-    /** Re-run the last user turn after a connection failure (the Retry button on the modal). */
+    /** Re-run the failed user turn after a connection failure (the Retry button on the modal). */
     fun retryLast() {
         val ctx = appContextRef ?: return
         val p = lastSend ?: return
-        if (sending) return
+        val target = lastSendConversationId
+        // The failed conversation may already be generating again (the user resent by hand); a
+        // retry must not stack a second turn onto it. Turns in other conversations don't block.
+        if (turnFor(target) != null) return
         networkErrorMessage = null
         send(
             ctx, p.text, p.attachmentMime, p.attachmentData, p.attachmentName, p.url, p.spec,
             p.key, p.model, p.name, p.style, p.memoryTier, p.webSearchEnabled, p.typingHaptics,
             insertUserMessage = false, useLocalModel = p.useLocalModel,
-            useLocalTools = p.useLocalTools, useLocalGpu = p.useLocalGpu
+            useLocalTools = p.useLocalTools, useLocalGpu = p.useLocalGpu,
+            // The failed turn's own conversation: the user may have moved to another chat while
+            // the error modal was up, and the retry must not land wherever they happen to be now.
+            targetConversationId = target
         )
     }
 
-    // ---- Typewriter internals ----
-    private val lock = Any()
-    private val buffer = StringBuilder()
-    private var shown = 0
-    private var typewriterJob: Job? = null
+    /**
+     * One in-flight reply, owning outright every piece of live state a generating turn touches:
+     * its coroutine, its typewriter (buffer, reveal job, epoch), its thinking/streaming flags, its
+     * parked confirmation, its retry parameters. That ownership is the whole concurrency model —
+     * several conversations can generate at once precisely because turns cannot see, much less
+     * clobber, one another's state. The screen looks a turn up by conversation id and renders only
+     * the one belonging to the conversation on screen.
+     *
+     * The per-turn [streamEpoch] survives from the single-slot days as defence in depth: within a
+     * turn, each round arms the stream anew, and a producer still draining (a cancelled cloud
+     * stream's last chunk, a stopping local decode's last token) carries a stale epoch and is
+     * dropped rather than contaminating the round that replaced it.
+     */
+    private class Turn(
+        // Null only for a send into a brand-new conversation, until the row is lazily created;
+        // resolved — and never changed again — the moment the id exists.
+        initialConversationId: Long?,
+        // Decided at send() time. Only a LOCAL turn holds gigabytes of RAM, is stopped by leaving
+        // its conversation or the app, and needs the native stop flag flipped on interrupt. At
+        // most one local turn can ever exist, because leaving its conversation stops it.
+        val isLocal: Boolean
+    ) {
+        var conversationId by mutableStateOf(initialConversationId)
+        var job: Job? = null
+        @Volatile var turnPersisted = false
+        // The full parameter set of this turn's send(), kept so a network failure can offer a
+        // one-tap Retry of THIS turn (see fail / retryLast).
+        var params: LastSend? = null
 
-    private fun currentLen(): Int = synchronized(lock) { buffer.length }
+        // ---- Observable per-turn UI state (read through the controller's *For helpers) ----
+        var thinking by mutableStateOf(false)
+        var loadingModel by mutableStateOf(false)
+        var streamingText by mutableStateOf<String?>(null)
+
+        // The confirm modal's answer for THIS turn is delivered back through this.
+        var confirmationDeferred: CompletableDeferred<ConfirmationOutcome>? = null
+
+        // ---- Typewriter internals (strictly per-turn; see the class comment) ----
+        val lock = Any()
+        val buffer = StringBuilder()
+        var shown = 0
+        var typewriterJob: Job? = null
+        @Volatile var streamEpoch = 0L
+
+        fun currentLen(): Int = synchronized(lock) { buffer.length }
+        fun snapshotBuffer(): String = synchronized(lock) { buffer.toString() }
+
+        fun onDelta(epoch: Long, delta: String) {
+            synchronized(lock) {
+                // Stale round — the stream was reset or finished after this producer started.
+                if (epoch != streamEpoch) return
+                buffer.append(delta)
+            }
+        }
+
+        /**
+         * Reveal the buffered reply as a typewriter (issue 11): one code point per beat, stride
+         * widening with the backlog (see stepFor) so the visible pace is even for short and long
+         * replies alike.
+         */
+        fun resetStream(reveal: Boolean) {
+            typewriterJob?.cancel()
+            synchronized(lock) {
+                streamEpoch++
+                buffer.setLength(0)
+            }
+            shown = 0
+            streamingText = null
+            if (!reveal) {
+                typewriterJob = null
+                return
+            }
+            val ctx = AssistantController.appContextRef
+            typewriterJob = AssistantController.genScope.launch {
+                while (isActive) {
+                    val text = synchronized(lock) { buffer.toString() }
+                    val len = text.length
+                    if (shown >= len) {
+                        delay(16); continue
+                    }
+                    val step = AssistantController.stepFor(len - shown)
+                    var moved = 0
+                    while (moved < step && shown < len) {
+                        val cp = text.codePointAt(shown)
+                        shown += Character.charCount(cp)
+                        moved++
+                    }
+                    streamingText = text.substring(0, shown.coerceAtMost(text.length))
+                    // Haptics belong to the conversation ON SCREEN only. Several turns can run at
+                    // once now, and a background conversation's typewriter ticking the motor would
+                    // keep the device vibrating for as long as it types — so a turn may only buzz
+                    // while it IS the conversation being looked at.
+                    if (ctx != null &&
+                        AssistantController.typingHapticsOn &&
+                        conversationId == AssistantController.currentConversationId
+                    ) {
+                        Haptics.typingTick(ctx)
+                    }
+                    delay(AssistantController.REVEAL_STEP_MS)
+                }
+            }
+        }
+
+        suspend fun finishTyping(finalText: String) {
+            synchronized(lock) {
+                if (buffer.length < finalText.length) {
+                    buffer.setLength(0)
+                    buffer.append(finalText)
+                }
+            }
+            while (shown < currentLen() && (typewriterJob?.isActive == true)) {
+                delay(16)
+            }
+        }
+
+        fun finishStream() {
+            typewriterJob?.cancel()
+            typewriterJob = null
+            streamingText = null
+            synchronized(lock) {
+                streamEpoch++
+                buffer.setLength(0)
+            }
+            shown = 0
+        }
+
+        /** The completion buzz, gated exactly like the typing tick: on-screen conversation only. */
+        fun completionBuzz() {
+            if (!AssistantController.typingHapticsOn) return
+            if (conversationId != AssistantController.currentConversationId) return
+            AssistantController.appContextRef?.let { Haptics.finishBuzz(it) }
+        }
+    }
 
     fun send(
         appContext: Context,
@@ -470,37 +714,54 @@ object AssistantController {
         insertUserMessage: Boolean = true,
         useLocalModel: Boolean = false,
         useLocalTools: Boolean = false,
-        useLocalGpu: Boolean = false
+        useLocalGpu: Boolean = false,
+        // Non-null only on the Retry path: the conversation the failed turn belongs to, so the
+        // re-run writes there even if the user has since moved to another chat. A fresh send
+        // always targets the conversation currently on screen.
+        targetConversationId: Long? = null
     ) {
-        if (sending) return
+        val targetKey = targetConversationId ?: currentConversationId
+        // One turn PER CONVERSATION: if this conversation is already generating, the button on its
+        // screen is a Stop button and a second send is meaningless. Turns in other conversations
+        // do NOT block — several conversations generating at once is the point of the registry.
+        if (turnFor(targetKey) != null) return
         appContextRef = appContext.applicationContext
         typingHapticsOn = typingHapticsEnabled
-        lastSend = LastSend(
+        val turn = Turn(initialConversationId = targetKey, isLocal = useLocalModel)
+        turn.params = LastSend(
             text, attachmentMime, attachmentData, attachmentName, url, spec, key, model,
             name, style, memoryTier, webSearchEnabled, typingHapticsEnabled, useLocalModel,
             useLocalTools, useLocalGpu
         )
-        sending = true
-        thinking = true
-        errorText = ""
+        turn.thinking = true
+        // Clear a leftover error banner only when it belongs to the conversation being sent in;
+        // another conversation's pending error must survive a send made elsewhere.
+        if (errorConversationId == targetKey) {
+            errorText = ""
+            errorConversationId = null
+        }
         networkErrorMessage = null
-        turnPersisted = false
         val db = AppDatabase.getInstance(appContext.applicationContext)
-        startGenerationService(name)
+        // First turn in brings the keep-alive service up; the last one out takes it down.
+        registerTurn(turn, name)
 
-        sendJob = genScope.launch {
+        turn.job = genScope.launch {
             try {
                 // Make sure there's a conversation to write into. If this is the first message of
                 // a fresh app (or right after "new conversation"), create the row now and switch
                 // the observed stream to it.
-                var convId = currentConversationId
+                var convId = targetConversationId ?: currentConversationId
                 if (convId == null) {
                     convId = db.chatConversationDao().insert(ChatConversation())
                     currentConversationId = convId
+                    // Written back-to-back with currentConversationId so the screen's turn lookup
+                    // (keyed by conversation id) can never observe a mismatched frame during the
+                    // lazy creation.
+                    turn.conversationId = convId
                     observeCurrentConversation(db)
                 }
                 val conversationId = convId
-                activeConversationId = conversationId
+                turn.conversationId = conversationId
 
                 // On a Retry after a connection failure the user's message is already in the
                 // thread, so only a fresh send inserts one (and refreshes the title/recency).
@@ -536,11 +797,11 @@ object AssistantController {
                 // is at its most fluent when it is fed a short, clean prompt rather than a tool
                 // protocol it will imitate badly.
                 if (useLocalModel) {
-                    // Flagged for the lifecycle paths: only a LOCAL turn is holding gigabytes of
-                    // RAM, and only a local turn is stopped by leaving the app (task 2).
-                    localTurnInFlight = true
-                    runLocalTurn(db, conversationId, useLocalTools, useLocalGpu, memoryTier)
-                    return@launch // the shared finally below still resets sending/thinking state
+                    // The turn was flagged local at construction; the lifecycle paths read that
+                    // off the registry — only a LOCAL turn holds gigabytes of RAM, and only a
+                    // local turn is stopped by leaving its conversation or the app (task 2).
+                    runLocalTurn(turn, db, conversationId, useLocalTools, useLocalGpu, memoryTier)
+                    return@launch // the shared finally below still cleans this turn's state
                 }
 
                 // Which stored messages travel to the model this turn is entirely the memory tier's
@@ -570,16 +831,19 @@ object AssistantController {
 
                 var round = 0
                 while (round < MAX_TOOL_ROUNDS) {
-                    thinking = true
+                    turn.thinking = true
                     // Buffer this round silently: we don't yet know whether the model will call a
                     // tool (whose preamble must never flash) or answer directly.
-                    resetStream(reveal = false)
+                    turn.resetStream(reveal = false)
+                    // Bind this round's deltas to the epoch armed above: late arrivals from a
+                    // cancelled stream can then never contaminate a newer turn's buffer.
+                    val roundEpoch = turn.streamEpoch
                     val result = LlmClient.streamChat(
                         url, spec, key, model, history, systemPrompt, tools
-                    ) { delta -> onDelta(delta) }
+                    ) { delta -> turn.onDelta(roundEpoch, delta) }
 
                     if (result.isFailure) {
-                        fail(result.exceptionOrNull() ?: Exception("Unknown error"))
+                        fail(turn, result.exceptionOrNull() ?: Exception("Unknown error"))
                         errored = true
                         break
                     }
@@ -606,7 +870,7 @@ object AssistantController {
                         }
 
                         val confirmed = if (AppTools.isMutating(call.name)) {
-                            confirmToolCall(call.name, call.argumentsJson)
+                            confirmToolCall(turn, call.name, call.argumentsJson)
                         } else ConfirmedCall(approved = true, argumentsJson = call.argumentsJson)
 
                         if (!confirmed.approved) {
@@ -630,7 +894,7 @@ object AssistantController {
                             break
                         }
 
-                        thinking = true
+                        turn.thinking = true
                         val r = AppTools.execute(
                             appContext, db, call.name, confirmed.argumentsJson,
                             uploadMime, uploadData, uploadName
@@ -690,23 +954,24 @@ object AssistantController {
                 if (declinedDetails != null) {
                     // A fixed, honest reply written here rather than asked for — see the break above.
                     val content = com.lucent.app.i18n.S.assistantDeclinedReply(declinedDetails)
-                    thinking = false
-                    resetStream(reveal = true)
-                    finishTyping(content)
+                    turn.thinking = false
+                    turn.resetStream(reveal = true)
+                    turn.finishTyping(content)
                     insertAssistant(db, conversationId, content, null, null, TokenEstimator.estimate(content))
-                    turnPersisted = true
-                    if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+                    turn.turnPersisted = true
+                    turn.completionBuzz()
                 } else if (!errored) {
                     if (finalReply == null) {
                         // Model kept calling tools past the cap — ask once more with tools OFF so
                         // it has to produce a written reply now.
-                        thinking = true
-                        resetStream(reveal = false)
+                        turn.thinking = true
+                        turn.resetStream(reveal = false)
+                        val forcedEpoch = turn.streamEpoch
                         val forced = LlmClient.streamChat(
                             url, spec, key, model, history, systemPrompt, emptyList()
-                        ) { delta -> onDelta(delta) }
+                        ) { delta -> turn.onDelta(forcedEpoch, delta) }
                         if (forced.isFailure) {
-                            fail(forced.exceptionOrNull() ?: Exception("Unknown error"))
+                            fail(turn, forced.exceptionOrNull() ?: Exception("Unknown error"))
                             errored = true
                         } else {
                             finalReply = forced.getOrThrow()
@@ -716,10 +981,10 @@ object AssistantController {
                         val img = reply.imageData?.takeIf { it.isNotBlank() }
                         val content = replyContent(reply.text, img != null, lastToolResults, userText = text)
                         // Hand off from the "thinking" bubble to the typewriter with no overlap.
-                        thinking = false
+                        turn.thinking = false
                         // The final round was buffered silently; reveal it now so it types out.
-                        resetStream(reveal = true)
-                        finishTyping(content)
+                        turn.resetStream(reveal = true)
+                        turn.finishTyping(content)
                         // Approximate cost of this turn (issue 9): the system prompt plus every turn
                         // actually sent (including any tool-result turns added along the way) plus the
                         // reply. Labelled approximate in the UI — see TokenEstimator.
@@ -727,25 +992,31 @@ object AssistantController {
                             TokenEstimator.estimateAll(history.map { it.content }) +
                             TokenEstimator.estimate(content)
                         insertAssistant(db, conversationId, content, reply.imageMime, img, tokens)
-                        turnPersisted = true
+                        turn.turnPersisted = true
                         // One firm buzz to mark the reply is complete (issue 11).
-                        if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+                        turn.completionBuzz()
                     }
                 }
             } catch (e: CancellationException) {
-                // A Stop press (issue 14) — stopGeneration() already handled state and any partial
-                // save; just let the coroutine end.
+                // A Stop press (issue 14) — stopTurn already handled this turn's state and any
+                // partial save; just let the coroutine end.
                 throw e
             } catch (e: Exception) {
-                fail(e)
+                fail(turn, e)
             } finally {
-                finishStream()
-                thinking = false
-                loadingModel = false
-                sending = false
-                localTurnInFlight = false
-                pendingConfirmation = null
-                stopGenerationService()
+                // This turn owns every piece of state it touches, so its cleanup cannot clobber
+                // another conversation's in-flight reply — the failure mode the old single-slot
+                // controller had to guard with job-identity checks. Idempotent against stopTurn
+                // having already done the same.
+                turn.finishStream()
+                turn.thinking = false
+                turn.loadingModel = false
+                if (confirmingTurn === turn) {
+                    confirmingTurn = null
+                    pendingConfirmation = null
+                }
+                // Last turn out takes the keep-alive service down (see registerTurn).
+                unregisterTurn(turn)
             }
         }
     }
@@ -776,6 +1047,7 @@ object AssistantController {
      * turn quietly.
      */
     private suspend fun runLocalTurn(
+        turn: Turn,
         db: AppDatabase,
         conversationId: Long,
         useTools: Boolean,
@@ -791,13 +1063,13 @@ object AssistantController {
         val ctx = appContextRef ?: return
 
         if (!com.lucent.app.local.LocalLlm.isSupported()) {
-            thinking = false
-            errorText = com.lucent.app.i18n.S.localModelUnsupportedAbi
+            turn.thinking = false
+            postError(turn, com.lucent.app.i18n.S.localModelUnsupportedAbi)
             return
         }
         if (!com.lucent.app.local.LocalModelStore.hasModel(ctx)) {
-            thinking = false
-            errorText = com.lucent.app.i18n.S.localModelMissing
+            turn.thinking = false
+            postError(turn, com.lucent.app.i18n.S.localModelMissing)
             return
         }
 
@@ -809,11 +1081,11 @@ object AssistantController {
         // dedicated "loading the model…" state so the wait is visibly *loading*, not a hang. If the
         // model is already resident (same slot, same backend) ensureLoaded returns instantly and the
         // flag barely flickers.
-        loadingModel = true
+        turn.loadingModel = true
         val loaded = try {
             com.lucent.app.local.LocalLlm.ensureLoaded(ctx)
         } finally {
-            loadingModel = false
+            turn.loadingModel = false
         }
         // Diagnostic trail (only written when the user has logging on): records how far the local
         // turn got and, below, the exact result code — so a "couldn't reply" report is actionable
@@ -823,14 +1095,14 @@ object AssistantController {
             "local turn: supported=true, model=${com.lucent.app.local.LocalModelStore.displayName(ctx) ?: "?"}, gpu=$useGpu, loaded=$loaded"
         )
         if (!loaded) {
-            thinking = false
-            errorText = com.lucent.app.i18n.S.localModelLoadFailed(com.lucent.app.i18n.S.localModelLoadFailedDetail)
+            turn.thinking = false
+            postError(turn, com.lucent.app.i18n.S.localModelLoadFailed(com.lucent.app.i18n.S.localModelLoadFailedDetail))
             return
         }
 
         // Tools are opt-in (default off, for phone performance — see the Settings toggle). With them
         // off this is a plain, fast chat that never spends a round on the tool protocol.
-        if (!useTools) { runLocalChatOnly(db, conversationId, memoryTier); return }
+        if (!useTools) { runLocalChatOnly(turn, db, conversationId, memoryTier); return }
 
         // The in-app tools (create/read/update/… notes and tasks). Web search is left off on
         // purpose: local mode is meant to work with no network, and a small model drives the
@@ -882,13 +1154,14 @@ object AssistantController {
         while (round < MAX_LOCAL_TOOL_ROUNDS) {
             // Buffer silently: this round's output might be a tool call, which must never flash on
             // screen as raw JSON. Only the final answer is revealed, at the end.
-            resetStream(reveal = false)
-            thinking = true
-            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> onDelta(piece) }
-            val raw = synchronized(lock) { buffer.toString() }
+            turn.resetStream(reveal = false)
+            turn.thinking = true
+            val roundEpoch = turn.streamEpoch
+            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> turn.onDelta(roundEpoch, piece) }
+            val raw = turn.snapshotBuffer()
 
             if (rc == 1) return                       // Stopped by the user (handled by stopGeneration).
-            if (rc != 0) { thinking = false; errorText = com.lucent.app.i18n.S.localModelGenerateFailed + " [" + rc + "]"; return }
+            if (rc != 0) { turn.thinking = false; postError(turn, com.lucent.app.i18n.S.localModelGenerateFailed + " [" + rc + "]"); return }
 
             val call = parseLocalToolCall(raw, validToolNames)
             if (call == null) {
@@ -899,13 +1172,13 @@ object AssistantController {
 
             // It's a tool call. Clear the buffer now so a Stop landing during the (suspending) tool
             // execution can't persist the tool-call JSON as if it were a reply.
-            resetStream(reveal = false)
+            turn.resetStream(reveal = false)
 
             val sig = signatureOf(call.name, call.argsJson)
             val cached = executed[sig]
             val result = if (cached != null) cached else {
                 val confirmed = if (AppTools.isMutating(call.name)) {
-                    confirmToolCall(call.name, call.argsJson)
+                    confirmToolCall(turn, call.name, call.argsJson)
                 } else ConfirmedCall(approved = true, argumentsJson = call.argsJson)
 
                 if (!confirmed.approved) {
@@ -915,16 +1188,16 @@ object AssistantController {
                     val content = com.lucent.app.i18n.S.assistantDeclinedReply(
                         AppTools.describeToolCall(call.name, call.argsJson)
                     )
-                    thinking = false
-                    resetStream(reveal = true)
-                    finishTyping(content)
+                    turn.thinking = false
+                    turn.resetStream(reveal = true)
+                    turn.finishTyping(content)
                     insertAssistant(db, conversationId, content, null, null, TokenEstimator.estimate(content))
-                    turnPersisted = true
-                    if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+                    turn.turnPersisted = true
+                    turn.completionBuzz()
                     return
                 }
 
-                thinking = true
+                turn.thinking = true
                 val r = AppTools.execute(
                     ctx, db, call.name, confirmed.argumentsJson,
                     uploadMime, uploadData, uploadName
@@ -943,24 +1216,25 @@ object AssistantController {
         // The model kept calling tools past the cap — ask once more, tools disabled, so it must
         // produce a written answer now instead of looping forever.
         if (finalText == null) {
-            resetStream(reveal = false)
-            thinking = true
+            turn.resetStream(reveal = false)
+            turn.thinking = true
             messages.add("system" to "Stop calling tools now and write your final answer to the user, in their language, as plain text. Do not output any JSON.")
-            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> onDelta(piece) }
+            val finalEpoch = turn.streamEpoch
+            val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> turn.onDelta(finalEpoch, piece) }
             if (rc == 1) return
-            finalText = deRobotify(synchronized(lock) { buffer.toString() }).trim()
+            finalText = deRobotify(turn.snapshotBuffer()).trim()
         }
 
         // Honest final text: the model's own words if it wrote any, otherwise a summary of what the
         // tools actually did (or a friendly retry line in the user's language) — never a bare "done".
         val content = replyContent(finalText, hasImage = false, toolResults = toolResults, userText = lastUserText)
-        thinking = false
-        resetStream(reveal = true)
-        finishTyping(content)
+        turn.thinking = false
+        turn.resetStream(reveal = true)
+        turn.finishTyping(content)
         val tokens = TokenEstimator.estimateAll(messages.map { it.second }) + TokenEstimator.estimate(content)
         insertAssistant(db, conversationId, content, null, null, tokens)
-        turnPersisted = true
-        if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+        turn.turnPersisted = true
+        turn.completionBuzz()
     }
 
     /**
@@ -969,7 +1243,7 @@ object AssistantController {
      * — no silent buffering, because with no tools there is never a tool-call JSON that could flash on
      * screen. This is the fast, low-overhead mode a weak phone gets unless the user opts tools in.
      */
-    private suspend fun runLocalChatOnly(db: AppDatabase, conversationId: Long, memoryTier: MemoryTier) {
+    private suspend fun runLocalChatOnly(turn: Turn, db: AppDatabase, conversationId: Long, memoryTier: MemoryTier) {
         val turns = buildHistory(db, conversationId, localTier(memoryTier))
             .filter { it.role == "user" || it.role == "assistant" }
             .map { it.role to it.content }
@@ -1036,26 +1310,27 @@ object AssistantController {
 
         // Arm the typewriter first, then decode: with no tools there is nothing to hide, so the reply
         // reveals live, the first token swapping the "thinking" bubble for streaming text.
-        resetStream(reveal = true)
+        turn.resetStream(reveal = true)
         var first = true
+        val chatEpoch = turn.streamEpoch
         val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece ->
-            if (first) { first = false; thinking = false }
-            onDelta(piece)
+            if (first) { first = false; turn.thinking = false }
+            turn.onDelta(chatEpoch, piece)
         }
         appContextRef?.let { com.lucent.app.data.StartupLog.event(it, "local chat: generate rc=$rc") }
         if (rc == 1) return   // Stopped by the user; stopGeneration saved any partial.
-        if (rc != 0) { thinking = false; errorText = com.lucent.app.i18n.S.localModelGenerateFailed + " [" + rc + "]"; return }
+        if (rc != 0) { turn.thinking = false; postError(turn, com.lucent.app.i18n.S.localModelGenerateFailed + " [" + rc + "]"); return }
 
         val content = replyContent(
-            deRobotify(synchronized(lock) { buffer.toString() }).trim(),
+            deRobotify(turn.snapshotBuffer()).trim(),
             hasImage = false, toolResults = emptyList(), userText = lastUserText
         )
-        thinking = false
-        finishTyping(content)
+        turn.thinking = false
+        turn.finishTyping(content)
         val tokens = TokenEstimator.estimateAll(messages.map { it.second }) + TokenEstimator.estimate(content)
         insertAssistant(db, conversationId, content, null, null, tokens)
-        turnPersisted = true
-        if (typingHapticsOn) appContextRef?.let { Haptics.finishBuzz(it) }
+        turn.turnPersisted = true
+        turn.completionBuzz()
     }
 
     /** How many tool rounds the on-device model may take before it is forced to answer in words. */
@@ -1276,32 +1551,43 @@ object AssistantController {
      * returning the user's decision. While it's parked the "thinking" bubble is hidden and the
      * confirm modal is shown; [resolveConfirmation] or [stopGeneration] completes the wait.
      */
-    private suspend fun confirmToolCall(name: String, argsJson: String): ConfirmedCall {
-        val deferred = CompletableDeferred<ConfirmationOutcome>()
-        confirmationDeferred = deferred
-        thinking = false
-        val editable = AppTools.editableArgument(name, argsJson)
-        pendingConfirmation = PendingConfirmation(
-            actionTitle = confirmTitleFor(name),
-            details = AppTools.describeToolCall(name, argsJson),
-            toolName = name,
-            editKey = editable?.key,
-            editLabel = editable?.label.orEmpty(),
-            editValue = editable?.value.orEmpty()
-        )
-        return try {
-            val outcome = deferred.await()
-            // An edit only counts when the user actually changed something to something non-blank.
-            // Blanking the field is treated as "leave it alone" rather than as a request to create
-            // a nameless item, which is the one edit that could not possibly be what they meant.
-            val edited = outcome.editedValue?.trim()
-            val finalArgs =
-                if (outcome.approved && editable != null && !edited.isNullOrBlank() && edited != editable.value) {
-                    AppTools.withArgument(argsJson, editable.key, edited)
-                } else argsJson
-            ConfirmedCall(outcome.approved, finalArgs)
-        } finally {
-            pendingConfirmation = null
+    private suspend fun confirmToolCall(turn: Turn, name: String, argsJson: String): ConfirmedCall {
+        // One modal, potentially many turns: the mutex serialises the questions so they are posed
+        // one at a time in arrival order, and an answer can never reach the wrong turn. A parked
+        // turn that gets stopped is unblocked by stopTurn (its deferred completes as a refusal);
+        // one still queued here waiting for its slot is unblocked by plain job cancellation.
+        confirmationMutex.withLock {
+            val deferred = CompletableDeferred<ConfirmationOutcome>()
+            turn.confirmationDeferred = deferred
+            confirmingTurn = turn
+            turn.thinking = false
+            val editable = AppTools.editableArgument(name, argsJson)
+            pendingConfirmation = PendingConfirmation(
+                actionTitle = confirmTitleFor(name),
+                details = AppTools.describeToolCall(name, argsJson),
+                toolName = name,
+                editKey = editable?.key,
+                editLabel = editable?.label.orEmpty(),
+                editValue = editable?.value.orEmpty()
+            )
+            return try {
+                val outcome = deferred.await()
+                // An edit only counts when the user actually changed something to something non-blank.
+                // Blanking the field is treated as "leave it alone" rather than as a request to create
+                // a nameless item, which is the one edit that could not possibly be what they meant.
+                val edited = outcome.editedValue?.trim()
+                val finalArgs =
+                    if (outcome.approved && editable != null && !edited.isNullOrBlank() && edited != editable.value) {
+                        AppTools.withArgument(argsJson, editable.key, edited)
+                    } else argsJson
+                ConfirmedCall(outcome.approved, finalArgs)
+            } finally {
+                if (confirmingTurn === turn) {
+                    confirmingTurn = null
+                    pendingConfirmation = null
+                }
+                turn.confirmationDeferred = null
+            }
         }
     }
 
@@ -1452,62 +1738,25 @@ object AssistantController {
      * server-side HTTP status) becomes a clear modal; everything else (bad key, provider error,
      * parse failure) stays an inline banner with its technical detail.
      */
-    private fun fail(t: Throwable) {
+    private fun fail(turn: Turn, t: Throwable) {
         if (t is java.io.IOException) {
+            // Pair the Retry offer with THIS turn: with several turns possible, "the most recent
+            // send" and "the send that failed" are no longer the same thing, and the retry must
+            // re-run the failed one — into its own conversation (see retryLast).
+            lastSend = turn.params
+            lastSendConversationId = turn.conversationId
             networkErrorMessage =
                 com.lucent.app.i18n.S.networkCantReach +
                     (t.message?.takeIf { it.isNotBlank() && it != "network error" }?.let { "\n\n($it)" } ?: "")
         } else {
-            errorText = "${t.javaClass.simpleName}: ${t.message ?: com.lucent.app.i18n.S.noDetails}"
+            postError(turn, "${t.javaClass.simpleName}: ${t.message ?: com.lucent.app.i18n.S.noDetails}")
         }
     }
 
-    private fun onDelta(delta: String) {
-        synchronized(lock) { buffer.append(delta) }
-    }
-
-    /**
-     * Reveal the buffered reply as a typewriter (issue 11).
-     *
-     * One code point at a time, on a fixed [REVEAL_STEP_MS] beat, so the *rhythm* is identical
-     * whether the script is Latin, CJK, Thai, or anything else — the unit is a glyph, never a word,
-     * which is what makes the cadence language-independent. Because the whole reply is already
-     * buffered before the reveal begins (tool rounds and the final answer are received silently),
-     * [stepFor] widens the stride when a large backlog is waiting, so a long reply flows smoothly and
-     * quickly rather than crawling — the visible speed stays even across short and long replies.
-     *
-     * A faint haptic tick fires on each revealed glyph (self-throttled in [Haptics] so it can't turn
-     * into a buzz), honouring "a low vibration for every character".
-     */
-    private fun resetStream(reveal: Boolean) {
-        typewriterJob?.cancel()
-        synchronized(lock) { buffer.setLength(0) }
-        shown = 0
-        streamingText = null
-        if (!reveal) {
-            typewriterJob = null
-            return
-        }
-        val ctx = appContextRef
-        typewriterJob = genScope.launch {
-            while (isActive) {
-                val text = synchronized(lock) { buffer.toString() }
-                val len = text.length
-                if (shown >= len) {
-                    delay(16); continue
-                }
-                val step = stepFor(len - shown)
-                var moved = 0
-                while (moved < step && shown < len) {
-                    val cp = text.codePointAt(shown)
-                    shown += Character.charCount(cp)
-                    moved++
-                }
-                streamingText = text.substring(0, shown.coerceAtMost(text.length))
-                if (ctx != null && typingHapticsOn) Haptics.typingTick(ctx)
-                delay(REVEAL_STEP_MS)
-            }
-        }
+    /** Surface an inline error tagged with the conversation it belongs to (see errorConversationId). */
+    private fun postError(turn: Turn, text: String) {
+        errorText = text
+        errorConversationId = turn.conversationId
     }
 
     /** Glyphs to reveal per beat: 1 for a normal reply, widening as the buffered backlog grows. */
@@ -1516,26 +1765,6 @@ object AssistantController {
         backlog > 200 -> 4
         backlog > 80 -> 2
         else -> 1
-    }
-
-    private suspend fun finishTyping(finalText: String) {
-        synchronized(lock) {
-            if (buffer.length < finalText.length) {
-                buffer.setLength(0)
-                buffer.append(finalText)
-            }
-        }
-        while (shown < currentLen() && (typewriterJob?.isActive == true)) {
-            delay(16)
-        }
-    }
-
-    private fun finishStream() {
-        typewriterJob?.cancel()
-        typewriterJob = null
-        streamingText = null
-        synchronized(lock) { buffer.setLength(0) }
-        shown = 0
     }
 
     private fun buildSystemPrompt(

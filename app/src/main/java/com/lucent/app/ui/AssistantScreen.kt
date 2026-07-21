@@ -274,15 +274,25 @@ fun AssistantScreen(active: Boolean = true) {
         deepMatches = matches
     }
 
-    val streamingText = AssistantController.streamingText
-    val sending = AssistantController.sending
-    val thinking = AssistantController.thinking
+    // Per-conversation turn state: several conversations can generate at once now, and this view
+    // must see exactly the turn belonging to the conversation ON SCREEN — the lookup by id IS the
+    // isolation, so a background conversation's reply can neither show its bubbles here nor block
+    // sending here. `sending` means "THIS conversation is generating" and drives its Stop/Send
+    // button; stopping only stops this conversation's reply.
+    val streamingText = AssistantController.streamingTextFor(AssistantController.currentConversationId)
+    val sending = AssistantController.isGenerating(AssistantController.currentConversationId)
+    val thinking = AssistantController.thinkingFor(AssistantController.currentConversationId)
     // While the on-device model is being loaded into memory, the thinking bubble says so explicitly,
     // so the (expected, multi-second) first-load wait reads as loading rather than a stall.
-    val loadingModel = AssistantController.loadingModel
+    val loadingModel = AssistantController.loadingModelFor(AssistantController.currentConversationId)
     val pendingConfirmation = AssistantController.pendingConfirmation
     val networkError = AssistantController.networkErrorMessage
-    val shownError = if (AssistantController.errorText.isNotBlank()) AssistantController.errorText else localError
+    // A background turn's failure is tagged with ITS conversation; only show it there.
+    val controllerError =
+        if (AssistantController.errorConversationId == AssistantController.currentConversationId) {
+            AssistantController.errorText
+        } else ""
+    val shownError = if (controllerError.isNotBlank()) controllerError else localError
 
     DisposableEffect(Unit) {
         onDispose { AssistantController.clearError() }
