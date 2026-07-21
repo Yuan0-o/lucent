@@ -606,9 +606,11 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
                 TextButton(onClick = {
                     confirmExitWhileReplying = false
                     // Stop explicitly rather than relying on the process going away: this writes the
-                    // "reply stopped" marker into the conversation, so the thread the user comes
-                    // back to explains itself instead of just missing an answer.
-                    AssistantController.stopGeneration()
+                    // "reply stopped" marker into each conversation, so every thread the user comes
+                    // back to explains itself instead of just missing an answer. ALL turns, because
+                    // several conversations can be generating and process death would lose every
+                    // background partial unmarked.
+                    AssistantController.stopAllGeneration()
                     runOrConfirm { finishActivity() }
                 }) { Text(com.lucent.app.i18n.S.lmExitAnyway) }
             },
