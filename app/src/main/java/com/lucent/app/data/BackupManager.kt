@@ -44,6 +44,32 @@ import java.io.OutputStream
  *
  * The payload is streamed through the envelope, so a large backup full of photos never has to fit in
  * memory twice.
+ *
+ * ### Streaming import (crash fix)
+ *
+ * Import is streamed too, and for the same reason export always was: a backup that carries the
+ * LOCAL_MODEL_FILES module is gigabytes, and the old import path read the whole file into one
+ * ByteArray, decrypted it into a second, and then held the decrypted copy alive behind the preview
+ * dialog. On a phone that is an immediate OutOfMemoryError — which is an Error, not an Exception,
+ * so the UI's catch blocks never saw it and the app simply died. It also could not have worked past
+ * 2 GB at all, since a JVM array cannot exceed Int.MAX_VALUE bytes.
+ *
+ * So [inspect] and [commit] now take a [BackupSource] — something that can be opened as an
+ * InputStream more than once — and never materialise the payload. Inspect makes one streaming pass
+ * to read the manifest and count the blob frames (names and sizes only; the gigabytes are skipped,
+ * not buffered). Commit makes a second pass and copies each wanted blob straight from the cipher
+ * stream to its destination file in 64 KB pieces. Peak memory is the manifest plus one buffer,
+ * regardless of how many model files ride along, and blob sizes are handled as Long throughout so
+ * a single >2 GB model restores correctly.
+ *
+ * ### One format, every platform
+ *
+ * The `.lcb` produced here is byte-portable between the Android and desktop builds: this file, and
+ * BackupCrypto/FileCrypto/CryptoUtil under it, are compiled verbatim on both, the manifest and the
+ * model/font slot manifests are plain JSON, PBKDF2/AES-GCM are standard primitives (the Rust fast
+ * path and the JCE fallback produce identical bytes), and blob names never reach the filesystem
+ * un-sanitised. Exporting on one platform and restoring on the other is a supported path, not a
+ * lucky one.
  */
 object BackupManager {
 
@@ -86,6 +112,28 @@ object BackupManager {
      */
     val DEFAULT_MODULES: Set<BackupModule> =
         BackupModule.entries.toSet() - BackupModule.LOCAL_MODEL_FILES
+
+    /**
+     * A backup the importer can open **more than once** — the shape streaming import needs.
+     *
+     * Inspect makes one pass (manifest + blob counts) and commit makes another (the blob bytes),
+     * so the source must be re-openable rather than a one-shot stream. On desktop that is simply
+     * the picked file; on Android the UI stages the picked document into the app's cache first,
+     * because a SAF Uri's read grant is not guaranteed to survive until the user finishes reading
+     * the confirm dialog — and losing a restore to an expired permission would be an absurd way
+     * to lose one.
+     *
+     * This is a fun interface rather than a File parameter so the class stays platform-neutral:
+     * both builds compile this file verbatim, which is what keeps the format cross-platform by
+     * construction instead of by promise.
+     */
+    fun interface BackupSource {
+        /** Open a fresh stream over the whole `.lcb` file, positioned at byte 0. */
+        fun open(): java.io.InputStream
+    }
+
+    /** The common case: a source backed by a plain file on disk. */
+    fun fileSource(file: java.io.File): BackupSource = BackupSource { file.inputStream() }
 
     /**
      * A backup selection: which modules, and — optionally — which individual notes and tasks.
@@ -348,84 +396,275 @@ object BackupManager {
         for (shift in 56 downTo 0 step 8) out.write(((value ushr shift) and 0xFF).toInt())
     }
 
+    // A blob name can only be a slot file name ("model_<id>.gguf", legacy "model.gguf") or a
+    // font name behind FONT_BLOB_PREFIX — all short. Anything longer means a corrupt or hostile
+    // length field, and rejecting it early stops that field from provoking a huge allocation.
+    private const val MAX_BLOB_NAME_BYTES = 1024
+
+    // Upper bound for the framed manifest. Real manifests are dominated by inlined attachments,
+    // which the app itself caps well below this; the bound exists so a corrupt or hand-forged
+    // length can never demand a multi-gigabyte allocation (or one beyond what a JVM array can
+    // even hold) before JSON parsing gets a chance to reject the file.
+    private const val MAX_MANIFEST_BYTES = 1_200_000_000
+
     /**
-     * Split a payload into its manifest and (if framed) the byte range where the blobs begin.
-     *
-     * Returns the manifest JSON plus the offset of the first blob, or -1 when the payload is a
-     * legacy plain-JSON one with no blobs at all.
+     * What one streaming pass over a decrypted payload found. [manifestJson] is always present;
+     * [framed] says whether blob frames follow the manifest (even if zero of them do), which is
+     * what commit needs to know to bother with a second pass.
      */
-    private fun readPayload(payload: ByteArray): Pair<String, Int> {
-        val framed = payload.size > 6 && payload[0] == FRAME_MAGIC && payload[1] == FRAME_VERSION
-        if (!framed) return payload.toString(Charsets.UTF_8) to -1
-        val jsonLen = readInt(payload, 2)
-        val start = 6
-        if (jsonLen < 0 || start + jsonLen > payload.size) {
-            // A truncated or corrupt frame: fall back to treating the whole thing as JSON so the
-            // failure surfaces as "this backup couldn't be read" rather than as a slice exception.
-            return payload.toString(Charsets.UTF_8) to -1
+    private class PayloadScan(
+        val manifestJson: String,
+        val framed: Boolean,
+        val modelCount: Int,
+        val modelBytes: Long,
+        val fontCount: Int,
+        val fontBytes: Long
+    )
+
+    /** Read exactly [len] bytes or throw — the framing has no optional fields. */
+    private fun readFully(input: java.io.InputStream, buffer: ByteArray, len: Int) {
+        var read = 0
+        while (read < len) {
+            val n = input.read(buffer, read, len - read)
+            if (n < 0) throw java.io.EOFException("Backup payload ended early")
+            read += n
         }
-        val json = String(payload, start, jsonLen, Charsets.UTF_8)
-        return json to (start + jsonLen)
     }
 
-    private fun readInt(b: ByteArray, at: Int): Int =
-        ((b[at].toInt() and 0xFF) shl 24) or ((b[at + 1].toInt() and 0xFF) shl 16) or
-            ((b[at + 2].toInt() and 0xFF) shl 8) or (b[at + 3].toInt() and 0xFF)
+    /**
+     * Discard exactly [count] plaintext bytes by READING them. Never `InputStream.skip()`: on the
+     * decrypting stream a skip would be delegated to the underlying ciphertext stream, silently
+     * jumping the frame parser into the middle of a GCM frame. Reading through keeps every skipped
+     * byte authenticated, which for a backup is a feature, not a cost.
+     */
+    private fun skipFully(input: java.io.InputStream, count: Long, scratch: ByteArray) {
+        var remaining = count
+        while (remaining > 0) {
+            val n = input.read(scratch, 0, minOf(remaining, scratch.size.toLong()).toInt())
+            if (n < 0) throw java.io.EOFException("Backup payload ended early")
+            remaining -= n
+        }
+    }
 
-    private fun readLong(b: ByteArray, at: Int): Long {
-        var v = 0L
-        for (i in 0 until 8) v = (v shl 8) or (b[at + i].toLong() and 0xFF)
+    /**
+     * Read one big-endian Int, or null on a clean end-of-stream **before any byte** — which is how
+     * the blob list legitimately ends. EOF in the middle of the four bytes is a truncated file.
+     */
+    private fun readIntOrEnd(input: java.io.InputStream): Int? {
+        val first = input.read()
+        if (first < 0) return null
+        var v = first and 0xFF
+        for (i in 0 until 3) {
+            val b = input.read()
+            if (b < 0) throw java.io.EOFException("Backup payload ended early")
+            v = (v shl 8) or (b and 0xFF)
+        }
         return v
     }
 
+    private fun readLongFrom(input: java.io.InputStream): Long {
+        var v = 0L
+        for (i in 0 until 8) {
+            val b = input.read()
+            if (b < 0) throw java.io.EOFException("Backup payload ended early")
+            v = (v shl 8) or (b.toLong() and 0xFF)
+        }
+        return v
+    }
+
+    /** Open [source] and hand back the decrypted plaintext stream, header already consumed. */
+    private fun openDecrypted(source: BackupSource, password: String?): java.io.InputStream {
+        val raw = source.open()
+        try {
+            // The plaintext envelope header. Read (not skipped) so a source that cannot seek still
+            // works, and re-parsed so key derivation matches this very stream.
+            val head = ByteArray(30)
+            try {
+                readFully(raw, head, head.size)
+            } catch (_: java.io.EOFException) {
+                throw IllegalArgumentException(com.lucent.app.i18n.S.notLcbBackup)
+            }
+            val header = BackupCrypto.readHeader(head)
+                ?: throw IllegalArgumentException(com.lucent.app.i18n.S.notLcbBackup)
+            return BackupCrypto.decryptingStream(raw, header, password)
+        } catch (t: Throwable) {
+            // The decrypting wrapper owns the raw stream only once it exists; on any earlier
+            // failure the stream would otherwise leak.
+            try { raw.close() } catch (_: Throwable) {}
+            throw t
+        }
+    }
+
     /**
-     * Write every framed blob out to its destination, returning (model files, fonts) written.
+     * One streaming pass over a decrypted payload: the manifest is read into memory (it is the one
+     * part that has to be — JSON is parsed whole), and every blob frame after it is measured and
+     * skipped. Nothing blob-sized is ever buffered, which is the entire crash fix: the old reader
+     * held the full payload — model files included — as a ByteArray, and a multi-gigabyte backup
+     * died in OutOfMemoryError before the preview dialog ever appeared.
+     *
+     * When [onBlob] is non-null it is offered each blob's (name, length, stream) and must consume
+     * EXACTLY that many bytes (or throw); when null the blob is skipped here. Either way the walk
+     * stays aligned on frame boundaries.
+     */
+    private fun scanPayload(
+        plain: java.io.InputStream,
+        onBlob: ((name: String, dataLen: Long, data: java.io.InputStream) -> Unit)? = null
+    ): PayloadScan {
+        val scratch = ByteArray(1 shl 16)
+
+        // One byte decides framed vs legacy. A legacy payload is bare JSON and begins with '{'
+        // (or whitespace); a framed one begins with FRAME_MAGIC. The consumed prefix is carried
+        // into the legacy read below, so nothing is lost either way.
+        val b0 = plain.read()
+        if (b0 < 0) {
+            // An empty payload. Let the JSON parser produce the one "damaged file" complaint the
+            // callers already translate, instead of inventing a second error path here.
+            return PayloadScan("", framed = false, 0, 0L, 0, 0L)
+        }
+        val b1 = plain.read()
+        val framed = b0 == (FRAME_MAGIC.toInt() and 0xFF) && b1 == (FRAME_VERSION.toInt() and 0xFF)
+
+        if (!framed) {
+            // Legacy plain-JSON payload: the manifest is the whole stream, prefix included.
+            val buffer = java.io.ByteArrayOutputStream(64 * 1024)
+            buffer.write(b0)
+            if (b1 >= 0) buffer.write(b1)
+            while (true) {
+                val n = plain.read(scratch)
+                if (n < 0) break
+                buffer.write(scratch, 0, n)
+            }
+            return PayloadScan(buffer.toString("UTF-8"), framed = false, 0, 0L, 0, 0L)
+        }
+
+        val jsonLen = readIntOrEnd(plain)
+            ?: throw IllegalArgumentException("That backup couldn't be read — the file may be damaged.")
+        if (jsonLen <= 0 || jsonLen > MAX_MANIFEST_BYTES) {
+            throw IllegalArgumentException("That backup couldn't be read — the file may be damaged.")
+        }
+        val manifestBytes = ByteArray(jsonLen)
+        try {
+            readFully(plain, manifestBytes, jsonLen)
+        } catch (_: java.io.EOFException) {
+            throw IllegalArgumentException("That backup couldn't be read — the file may be damaged.")
+        }
+        val manifestJson = String(manifestBytes, Charsets.UTF_8)
+
+        // Walk the blob frames. The loop mirrors the old in-memory reader's tolerance exactly: a
+        // clean end between frames is the normal stop, and a frame that cannot be read whole ends
+        // the walk quietly — best-effort, so a truncated tail can't take down a restore whose
+        // manifest (the user's actual data) already parsed.
+        var modelCount = 0
+        var modelBytes = 0L
+        var fontCount = 0
+        var fontBytes = 0L
+        while (true) {
+            val nameLen = try {
+                readIntOrEnd(plain) ?: break
+            } catch (_: java.io.EOFException) {
+                break
+            }
+            if (nameLen <= 0 || nameLen > MAX_BLOB_NAME_BYTES) break
+            val name: String
+            val dataLen: Long
+            try {
+                val nameBytes = ByteArray(nameLen)
+                readFully(plain, nameBytes, nameLen)
+                name = String(nameBytes, Charsets.UTF_8)
+                dataLen = readLongFrom(plain)
+            } catch (_: java.io.EOFException) {
+                break
+            }
+            if (dataLen < 0) break
+            if (name.startsWith(FONT_BLOB_PREFIX)) {
+                fontCount++
+                fontBytes += dataLen
+            } else {
+                modelCount++
+                modelBytes += dataLen
+            }
+            try {
+                if (onBlob != null) onBlob(name, dataLen, plain) else skipFully(plain, dataLen, scratch)
+            } catch (_: java.io.EOFException) {
+                // The advertised bytes weren't all there: a truncated file. Everything counted or
+                // written so far stands; there is simply nothing further to walk.
+                break
+            }
+        }
+        return PayloadScan(manifestJson, framed = true, modelCount, modelBytes, fontCount, fontBytes)
+    }
+
+    /**
+     * Copy one blob from the decrypted stream to its destination, returning (models, fonts)
+     * written as 0/1 pairs. Called from inside the scan walk, so on ANY outcome it must leave the
+     * stream advanced exactly [dataLen] bytes past where it started — a blob that fails to land on
+     * disk is drained, not abandoned mid-frame, or every blob after it would be misread.
      *
      * A blob's name carries its destination: a [FONT_BLOB_PREFIX]-prefixed name is an imported
      * font (routed to FontStore with the prefix stripped), anything else is a local model file —
      * which is also what every pre-v11 backup contains, so old files keep restoring without a
-     * version check. Each side is written only when its module was chosen, and each blob is
-     * deliberately best-effort: one unwritable file (out of space, a name the filesystem rejects)
-     * must not abort a restore that has already put the user's notes back.
+     * version check. Each write is deliberately best-effort: one unwritable file (out of space, a
+     * name the filesystem rejects) must not abort a restore that has already put the user's notes
+     * back. Blob sizes are Long end to end, so a single model past 2 GB — impossible for the old
+     * ByteArray reader even in principle — streams through correctly.
      */
-    private fun restoreBlobs(
+    private fun restoreOneBlob(
         context: Context,
-        payload: ByteArray,
-        from: Int,
+        name: String,
+        dataLen: Long,
+        data: java.io.InputStream,
         wantModels: Boolean,
-        wantFonts: Boolean
+        wantFonts: Boolean,
+        scratch: ByteArray
     ): Pair<Int, Int> {
-        var at = from
-        var models = 0
-        var fonts = 0
-        while (at + 4 <= payload.size) {
-            val nameLen = readInt(payload, at); at += 4
-            if (nameLen <= 0 || at + nameLen + 8 > payload.size) break
-            val name = String(payload, at, nameLen, Charsets.UTF_8); at += nameLen
-            val dataLen = readLong(payload, at); at += 8
-            if (dataLen < 0 || at + dataLen > payload.size) break
-            val isFont = name.startsWith(FONT_BLOB_PREFIX)
-            if ((isFont && wantFonts) || (!isFont && wantModels)) {
-                try {
-                    val target = if (isFont) {
-                        FontStore.prepareRestoreTarget(context, name.removePrefix(FONT_BLOB_PREFIX))
-                    } else {
-                        com.lucent.app.local.LocalModelStore.prepareRestoreTarget(context, name)
-                    }
-                    // Straight to a temp file and renamed into place, so an interrupted restore can
-                    // never leave a half-written payload that the app would then try to load.
-                    val tmp = java.io.File(target.absolutePath + ".tmp")
-                    tmp.outputStream().use { out -> out.write(payload, at, dataLen.toInt()) }
-                    if (target.exists()) target.delete()
-                    if (tmp.renameTo(target)) {
-                        if (isFont) fonts++ else models++
-                    } else tmp.delete()
-                } catch (_: Throwable) {
-                }
-            }
-            at += dataLen.toInt()
+        val isFont = name.startsWith(FONT_BLOB_PREFIX)
+        if ((isFont && !wantFonts) || (!isFont && !wantModels)) {
+            skipFully(data, dataLen, scratch)
+            return 0 to 0
         }
-        return models to fonts
+        var tmp: java.io.File? = null
+        var out: java.io.OutputStream? = null
+        var written = 0L
+        try {
+            val target = if (isFont) {
+                FontStore.prepareRestoreTarget(context, name.removePrefix(FONT_BLOB_PREFIX))
+            } else {
+                com.lucent.app.local.LocalModelStore.prepareRestoreTarget(context, name)
+            }
+            // Straight to a temp file and renamed into place, so an interrupted restore can never
+            // leave a half-written payload that the app would then try to load.
+            val tmpFile = java.io.File(target.absolutePath + ".tmp")
+            tmp = tmpFile
+            val os = tmpFile.outputStream()
+            out = os
+            while (written < dataLen) {
+                val n = data.read(scratch, 0, minOf(dataLen - written, scratch.size.toLong()).toInt())
+                if (n < 0) throw java.io.EOFException("Backup payload ended early")
+                os.write(scratch, 0, n)
+                written += n
+            }
+            os.close()
+            out = null
+            if (target.exists()) target.delete()
+            return if (tmpFile.renameTo(target)) {
+                if (isFont) 0 to 1 else 1 to 0
+            } else {
+                tmpFile.delete()
+                0 to 0
+            }
+        } catch (eof: java.io.EOFException) {
+            // The stream itself ran dry — nothing more can be read, so tell the walk to stop.
+            try { out?.close() } catch (_: Throwable) {}
+            tmp?.delete()
+            throw eof
+        } catch (_: Throwable) {
+            // A destination-side failure (disk full, an unwritable name). The stream is fine, so
+            // drain this blob's remaining bytes to stay frame-aligned, then carry on to the next.
+            try { out?.close() } catch (_: Throwable) {}
+            tmp?.delete()
+            skipFully(data, dataLen - written, scratch)
+            return 0 to 0
+        }
     }
 
     /**
@@ -756,10 +995,20 @@ object BackupManager {
         /** How many imported fonts are attached as framed blobs, and their combined size. */
         val fontFiles: Int = 0,
         val fontBytes: Long = 0L,
-        /** Where the blobs start in the decrypted payload, or -1 when there are none. */
-        internal val blobOffset: Int = -1,
-        /** The decrypted payload, retained only when there are blobs to write out on commit. */
-        internal val payload: ByteArray? = null,
+        /**
+         * Whether blob frames follow the manifest in this file. What used to sit here was the
+         * decrypted payload itself — gigabytes of it for a backup carrying model files, pinned in
+         * memory for as long as the confirm dialog stayed open. Commit now re-streams the blobs
+         * from the [BackupSource] instead, so the preview carries a flag, not the freight.
+         */
+        internal val hasBlobs: Boolean = false,
+        /**
+         * The password that successfully decrypted this file at inspect time (null for the
+         * built-in key). Commit's second streaming pass re-derives the same key from it, which
+         * costs one more PBKDF2 run for password-protected files — a second of CPU, paid so that
+         * multi-gigabyte payloads never have to be paid for in RAM.
+         */
+        internal val password: String? = null,
         /**
          * The conversations found in the file, as (id, title). Drives the import-side chat picker
          * (task F2), exactly as the loaded conversation list drives the export-side one. Empty for a
@@ -788,17 +1037,40 @@ object BackupManager {
      * send someone in three different directions, and telling them the wrong one is how a perfectly
      * good backup gets deleted in frustration.
      */
-    suspend fun inspect(context: Context, bytes: ByteArray, password: String? = null): BackupPreview {
-        val header = BackupCrypto.readHeader(bytes)
-            // Only `.lcb` envelopes are accepted now (task 5). A file without our envelope header —
-            // a legacy ZIP, a bare JSON, or something that isn't a Lucent backup at all — is refused
-            // here rather than being parsed by a reader that no longer exists.
-            ?: throw IllegalArgumentException(
-                com.lucent.app.i18n.S.notLcbBackup
-            )
-
-        val payload = BackupCrypto.decrypt(bytes, password)
-        val (manifestJson, blobOffset) = readPayload(payload)
+    suspend fun inspect(context: Context, source: BackupSource, password: String? = null): BackupPreview {
+        // Only `.lcb` envelopes are accepted now (task 5). A file without our envelope header —
+        // a legacy ZIP, a bare JSON, or something that isn't a Lucent backup at all — is refused
+        // by openDecrypted rather than being parsed by a reader that no longer exists.
+        //
+        // Everything below is ONE streaming pass: the manifest (the only part JSON parsing forces
+        // into memory) is read, and the blob frames after it are counted and sized without ever
+        // being buffered. The old reader decrypted the whole payload — model files included — into
+        // a ByteArray first, which on a backup carrying the LOCAL_MODEL_FILES module meant an
+        // OutOfMemoryError, and an OOM is an Error the UI's catch(Exception) never saw: the app
+        // simply vanished. That is the "import crashes the app" bug, fixed at the root here.
+        val needsPassword: Boolean
+        val scan: PayloadScan
+        var plain: java.io.InputStream? = null
+        try {
+            // The header decides whether a password is even relevant; read it once, cheaply, from
+            // its own tiny stream so the answer can be reported on the preview.
+            needsPassword = peekPasswordRequirement(source)?.needsPassword
+                ?: throw IllegalArgumentException(com.lucent.app.i18n.S.notLcbBackup)
+            plain = openDecrypted(source, password)
+            scan = try {
+                scanPayload(plain)
+            } catch (t: java.io.IOException) {
+                if (t is BackupCrypto.WrongPasswordException) throw t
+                // A GCM tag failure on the very first frame is, overwhelmingly, a wrong password —
+                // a damaged file is far rarer than a typo. Report the likely cause, not the literal
+                // one — the same reading BackupCrypto.decrypt always gave.
+                if (needsPassword) throw BackupCrypto.WrongPasswordException()
+                throw java.io.IOException("Backup file is damaged", t)
+            }
+        } finally {
+            try { plain?.close() } catch (_: Throwable) {}
+        }
+        val manifestJson = scan.manifestJson
 
         val root = try {
             JSONObject(manifestJson)
@@ -828,32 +1100,11 @@ object BackupManager {
             attachments += Attachments.parse(o.optString("attachments", "[]")).size
         }
 
-        // Walk the blob frames to count and size them, WITHOUT copying any of the payload bytes —
+        // The blob counts and sizes come out of the same streaming pass that read the manifest —
         // the preview only needs to be able to say "2 model files, 3.1 GB; 4 imported fonts",
         // which is exactly the fact a user needs before agreeing to a restore of that size. The
-        // short blob NAMES are read, purely to tell font blobs from model blobs by their prefix.
-        var modelCount = 0
-        var modelBytes = 0L
-        var fontCount = 0
-        var fontBytes = 0L
-        if (blobOffset >= 0) {
-            var at = blobOffset
-            while (at + 4 <= payload.size) {
-                val nameLen = readInt(payload, at); at += 4
-                if (nameLen <= 0 || at + nameLen + 8 > payload.size) break
-                val name = String(payload, at, nameLen, Charsets.UTF_8); at += nameLen
-                val dataLen = readLong(payload, at); at += 8
-                if (dataLen < 0 || at + dataLen > payload.size) break
-                if (name.startsWith(FONT_BLOB_PREFIX)) {
-                    fontCount++
-                    fontBytes += dataLen
-                } else {
-                    modelCount++
-                    modelBytes += dataLen
-                }
-                at += dataLen.toInt()
-            }
-        }
+        // short blob NAMES were read, purely to tell font blobs from model blobs by their prefix;
+        // the payload bytes themselves were skipped, never copied.
 
         // The conversations and API profile names in the file, for the import-side pickers (task F2).
         // Parsed here (not counted), so the confirm dialog can offer "restore only these chats / these
@@ -874,7 +1125,7 @@ object BackupManager {
             formatVersion = root.optInt("version", 0),
             exportedAt = root.optLong("exportedAt", 0L).takeIf { it > 0 },
             encrypted = true,
-            passwordProtected = header.needsPassword,
+            passwordProtected = needsPassword,
             notes = notesArr?.length() ?: 0,
             archivedNotes = archived,
             trashedNotes = trashedNotes,
@@ -891,16 +1142,24 @@ object BackupManager {
                     runCatching { BackupModule.valueOf(arr.optString(i)) }.getOrNull()
                 }.toSet()
             } ?: emptySet(),
-            modelFiles = modelCount,
-            modelBytes = modelBytes,
-            fontFiles = fontCount,
-            fontBytes = fontBytes,
-            blobOffset = blobOffset,
-            payload = if (blobOffset >= 0) payload else null,
+            modelFiles = scan.modelCount,
+            modelBytes = scan.modelBytes,
+            fontFiles = scan.fontCount,
+            fontBytes = scan.fontBytes,
+            hasBlobs = scan.framed,
+            password = password,
             conversationList = convList,
             apiProfileNames = profileNames
         )
     }
+
+    /**
+     * Compatibility wrapper for callers that already hold the whole file in memory (small,
+     * model-less backups; tests). Delegates to the streaming implementation — the array is simply
+     * a source that can be re-opened for free.
+     */
+    suspend fun inspect(context: Context, bytes: ByteArray, password: String? = null): BackupPreview =
+        inspect(context, BackupSource { bytes.inputStream() }, password)
 
     /**
      * Actually restore a previously [inspect]ed backup. This is the only call that writes.
@@ -918,23 +1177,47 @@ object BackupManager {
         // everything in that module, a non-null set is an explicit subset. Chats by conversation id,
         // API by profile name — the same handles the export side and the preview lists use.
         conversationIds: Set<Long>? = null,
-        apiProfileNames: Set<String>? = null
+        apiProfileNames: Set<String>? = null,
+        // The same source [inspect] read. Needed only when the file carries blob frames and one of
+        // the blob-bearing modules was chosen; commit re-opens it and streams the blobs straight to
+        // disk. Last-with-a-default so every existing positional call still compiles unchanged.
+        source: BackupSource? = null
     ): String {
         // Blobs first, and deliberately so: the model slot manifest and the font library manifest
         // are each adopted only for files actually present on disk (see the two restoreFromBackup
         // implementations), so the payloads have to land before the settings block is read or
         // every restored slot would be discarded as dangling. Model files restore under their own
         // opt-in module; fonts restore with the SETTINGS module they travelled with.
+        //
+        // This is the second streaming pass over the file (inspect made the first). The decrypted
+        // bytes go from the cipher straight to each blob's temp file in 64 KB pieces — the preview
+        // no longer smuggles a multi-gigabyte payload across the confirm dialog, which is the
+        // memory shape that used to kill the import of any backup containing a local model.
         var restoredModels = 0
         var restoredFonts = 0
-        val payload = preview.payload
-        if (payload != null && preview.blobOffset >= 0) {
+        if (preview.hasBlobs && source != null) {
             val wantModels = BackupModule.LOCAL_MODEL_FILES in modules
             val wantFonts = BackupModule.SETTINGS in modules
             if (wantModels || wantFonts) {
-                val (m, f) = restoreBlobs(context, payload, preview.blobOffset, wantModels, wantFonts)
-                restoredModels = m
-                restoredFonts = f
+                val scratch = ByteArray(1 shl 16)
+                var plain: java.io.InputStream? = null
+                try {
+                    plain = openDecrypted(source, preview.password)
+                    scanPayload(plain) { name, dataLen, data ->
+                        val (m, f) = restoreOneBlob(
+                            context, name, dataLen, data, wantModels, wantFonts, scratch
+                        )
+                        restoredModels += m
+                        restoredFonts += f
+                    }
+                } catch (_: Throwable) {
+                    // Best-effort by design, exactly as the old in-memory walk was: whatever blobs
+                    // already landed stay landed, and the manifest restore below — the user's
+                    // actual notes and tasks — still runs. The report will honestly show how many
+                    // model files made it.
+                } finally {
+                    try { plain?.close() } catch (_: Throwable) {}
+                }
             }
         }
         val summary = importJson(
@@ -967,6 +1250,27 @@ object BackupManager {
      * "not a restorable file" (legacy ZIP/JSON support has been removed — task 5).
      */
     fun peekPasswordRequirement(bytes: ByteArray): BackupCrypto.Header? = BackupCrypto.readHeader(bytes)
+
+    /**
+     * The streaming twin of the ByteArray peek: reads only the first few dozen bytes of [source] —
+     * the plaintext envelope header — instead of requiring the whole file in memory first, which
+     * for a backup carrying model files is the difference between a 64-byte read and an OOM.
+     * Returns null when the file can't be read at all or isn't one of ours.
+     */
+    fun peekPasswordRequirement(source: BackupSource): BackupCrypto.Header? = try {
+        source.open().use { input ->
+            val head = ByteArray(64)
+            var read = 0
+            while (read < head.size) {
+                val n = input.read(head, read, head.size - read)
+                if (n < 0) break
+                read += n
+            }
+            if (read == 0) null else BackupCrypto.readHeader(head.copyOf(read))
+        }
+    } catch (_: Throwable) {
+        null
+    }
 
     /**
      * Restore from a decrypted manifest string (the JSON sealed inside a `.lcb`). Attachments are

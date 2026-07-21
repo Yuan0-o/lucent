@@ -27,6 +27,10 @@ object AttachmentLimits {
     fun formatBytes(bytes: Long): String {
         if (bytes <= 0) return "0 MB"
         val mb = bytes.toDouble() / (1024 * 1024)
+        // Model files brought a new order of magnitude into this dialog: a 16 GB GGUF read as
+        // "16384 MB" is technically true and practically unreadable, so gigabyte-scale sizes get
+        // their own tier. One decimal keeps "1.5 GB" honest without pretending to precision.
+        if (mb >= 1024) return String.format("%.1f GB", mb / 1024)
         return if (mb >= 10) "${mb.toInt()} MB"
         else String.format("%.1f MB", mb)
     }
