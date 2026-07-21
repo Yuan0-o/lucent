@@ -899,8 +899,6 @@ open class Tr {
     open val memoryLocalTierNote: String = "The local assistant is on: memory is set to low and the high tier is unavailable, because an on-device model works best with a short prompt. Your previous choice comes back when you turn the local assistant off."
     open val apiNoneTitle: String = "No API saved"
     open val apiNoneBody: String = "You've deleted every saved API. Add one to use the cloud assistant, or import a local model to chat offline."
-    open val attachmentsSectionTitle: String = "Attachments"
-    open val attachmentsSectionHint: String = "Images, PDFs, audio or any other file."
     open val helpLocalizedFilters: String = "Filters also work in your own language — type 完成 / 完了 / 완료 instead of is:done. Wrap a word in quotes to search for it literally."
 
     // ---- Editable tool confirmations, declined actions, and modular backup ----
@@ -1725,8 +1723,6 @@ object Zh : Tr() {
     override val memoryLocalTierNote: String = "本地助手已开启：记忆已设为低档，且高档不可用——端侧模型在较短上下文下表现最好。关闭本地助手后会恢复你之前的选择。"
     override val apiNoneTitle: String = "尚无已保存的 API"
     override val apiNoneBody: String = "你已删除全部已保存的 API。添加一个即可使用云端助手，或导入本地模型离线聊天。"
-    override val attachmentsSectionTitle: String = "附件"
-    override val attachmentsSectionHint: String = "图片、PDF、音频或任意其他文件。"
     override val helpLocalizedFilters: String = "筛选词也支持用你自己的语言输入——可以直接输入「已完成」，无需 is:done。用引号括起来则按字面搜索。"
 
     // ---- Editable tool confirmations, declined actions, and modular backup ----
@@ -2549,8 +2545,6 @@ object Ja : Tr() {
     override val memoryLocalTierNote: String = "ローカルアシスタントがオンです：記憶は「低」に設定され、「高」は選べません。端末上のモデルは短いプロンプトで最もよく動作します。オフにすると以前の選択に戻ります。"
     override val apiNoneTitle: String = "保存されたAPIがありません"
     override val apiNoneBody: String = "保存済みのAPIをすべて削除しました。クラウドアシスタントを使うには1つ追加するか、ローカルモデルをインポートしてオフラインで会話してください。"
-    override val attachmentsSectionTitle: String = "添付ファイル"
-    override val attachmentsSectionHint: String = "画像・PDF・音声など、どんなファイルでも。"
     override val helpLocalizedFilters: String = "フィルターは日本語でも使えます。is:done の代わりに「完了」と入力できます。引用符で囲むと、その語をそのまま検索します。"
 
     // ---- Editable tool confirmations, declined actions, and modular backup ----
@@ -3373,8 +3367,6 @@ object Ko : Tr() {
     override val memoryLocalTierNote: String = "로컬 어시스턴트가 켜져 있습니다: 메모리는 '낮음'으로 설정되고 '높음'은 사용할 수 없습니다. 온디바이스 모델은 짧은 프롬프트에서 가장 잘 작동합니다. 끄면 이전 선택으로 돌아갑니다."
     override val apiNoneTitle: String = "저장된 API 없음"
     override val apiNoneBody: String = "저장된 API를 모두 삭제했습니다. 클라우드 어시스턴트를 사용하려면 하나를 추가하거나, 로컬 모델을 가져와 오프라인으로 대화하세요."
-    override val attachmentsSectionTitle: String = "첨부 파일"
-    override val attachmentsSectionHint: String = "이미지, PDF, 오디오 등 모든 파일."
     override val helpLocalizedFilters: String = "필터는 한국어로도 사용할 수 있습니다. is:done 대신 '완료'라고 입력하면 됩니다. 따옴표로 묶으면 글자 그대로 검색합니다."
 
     // ---- Editable tool confirmations, declined actions, and modular backup ----
