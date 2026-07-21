@@ -233,6 +233,11 @@ open class Tr {
     open fun statWordsN(n: Int): String = "${n} words"
     open fun statMinRead(n: Int): String = "${n} min read"
     open val labelFormat: String = "Format"
+    // PDF font hints (desktop-only export addition): desktop PDFs embed the user's imported fonts,
+    // so the export screen states what a PDF written right now would contain — see
+    // DocumentExport.loadPdfFonts and ExportSelectionScreen.
+    open val exportPdfFontHint: String = "PDF text is drawn with your imported fonts (tried in list order). Characters none of them cover appear as \"\u00B7\"."
+    open val exportPdfNoFontHint: String = "No fonts imported: PDFs fall back to a built-in Latin font, so other characters appear as \"\u00B7\". Import a font in Settings to cover your language."
     open fun exportNSelected(count: Int): String = "Export ${count} selected"
     open val notifChannelName: String = "Task reminders"
     open val notifChannelDesc: String = "Alerts you when a task with a reminder reaches its due time"
@@ -1077,6 +1082,8 @@ object Zh : Tr() {
     override fun statWordsN(n: Int): String = "${n} 词"
     override fun statMinRead(n: Int): String = "阅读约 ${n} 分钟"
     override val labelFormat: String = "格式"
+    override val exportPdfFontHint: String = "PDF 文本使用你导入的字体渲染（按列表顺序尝试）；这些字体都覆盖不到的字符将显示为“\u00B7”。"
+    override val exportPdfNoFontHint: String = "尚未导入任何字体：PDF 将退回内置拉丁字体，其他文字会显示为“\u00B7”。可在设置中导入字体以覆盖你的语言。"
     override fun exportNSelected(count: Int): String = "导出所选 ${count} 项"
     override val notifChannelName: String = "任务提醒"
     override val notifChannelDesc: String = "当设置了提醒的任务到达截止时间时通知你"
@@ -1912,6 +1919,8 @@ object Ja : Tr() {
     override fun statWordsN(n: Int): String = "${n} 単語"
     override fun statMinRead(n: Int): String = "約${n}分で読了"
     override val labelFormat: String = "形式"
+    override val exportPdfFontHint: String = "PDFのテキストはインポート済みフォントで描画されます（一覧の順に試行）。どのフォントにも含まれない文字は「\u00B7」と表示されます。"
+    override val exportPdfNoFontHint: String = "フォントが未インポートのため、PDFは内蔵のラテン文字フォントのみで描画され、それ以外の文字は「\u00B7」と表示されます。設定でフォントをインポートしてください。"
     override fun exportNSelected(count: Int): String = "選択した${count}件をエクスポート"
     override val notifChannelName: String = "タスクのリマインダー"
     override val notifChannelDesc: String = "リマインダー付きのタスクが期限を迎えるとお知らせします"
@@ -2747,6 +2756,8 @@ object Ko : Tr() {
     override fun statWordsN(n: Int): String = "단어 ${n}개"
     override fun statMinRead(n: Int): String = "${n}분 분량"
     override val labelFormat: String = "형식"
+    override val exportPdfFontHint: String = "PDF 텍스트는 가져온 글꼴로 그려집니다(목록 순서대로 시도). 어떤 글꼴에도 없는 문자는 \"\u00B7\"로 표시됩니다."
+    override val exportPdfNoFontHint: String = "가져온 글꼴이 없어 PDF는 내장 라틴 글꼴로만 렌더링되며, 그 외 문자는 \"\u00B7\"로 표시됩니다. 설정에서 글꼴을 가져와 주세요."
     override fun exportNSelected(count: Int): String = "선택한 ${count}개 내보내기"
     override val notifChannelName: String = "할 일 알림"
     override val notifChannelDesc: String = "알림이 설정된 할 일이 마감 시간이 되면 알려줍니다"

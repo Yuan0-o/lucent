@@ -2,6 +2,10 @@
 # Lucent translation catalog. ENTRIES: (key_or_signature, en, zh, ja, ko).
 # {param} inside templates becomes ${param} in generated Kotlin.
 # None => no override => falls back to English.
+# A bare string item is a comment line, emitted verbatim (indented) into Tr only.
+# NOTE: gen_i18n.py writes ONLY the Android I18n.kt. The desktop file
+# (desktop/src/main/kotlin/com/lucent/app/i18n/I18n.kt) is a hand-maintained fork that also
+# carries desktop-only strings (Windows Hello, PDF font hints, ...) — sync it by hand.
 
 ENTRIES = [
     # ---- Tabs / navigation ----
@@ -111,6 +115,7 @@ ENTRIES = [
     ("checklist", "Checklist", "清单", "チェックリスト", "체크리스트"),
     ("checklistEmptyItem", "(empty)", "（空）", "（空）", "(비어 있음)"),
     ("checklistRemoveA11y(text: String)", "Remove \"{text}\"", "移除“{text}”", "「{text}」を削除", "\"{text}\" 제거"),
+    ("checklistEditItem", "Edit item", "编辑项目", "項目を編集", "항목 편집"),
     ("checklistMore(count: Int)", "+{count} more", "还有 {count} 项", "他 {count} 件", "외 {count}개"),
 
     # ---- Expandable text field ----
@@ -215,6 +220,8 @@ ENTRIES = [
     ("a11yStopGenerating", "Stop generating", "停止生成", "生成を停止", "생성 중지"),
     ("a11ySend", "Send", "发送", "送信", "보내기"),
     ("a11yJumpToLatest", "Jump to latest", "跳到最新", "最新へ移動", "최신으로 이동"),
+    ("a11yScrollToTop", "Scroll to top", "滚动到顶部", "一番上へスクロール", "맨 위로 스크롤"),
+    ("a11yScrollToBottom", "Scroll to bottom", "滚动到底部", "一番下へスクロール", "맨 아래로 스크롤"),
     ("thinkingIndicator(name: String)", "{name} is thinking", "{name} 正在思考", "{name}が考えています", "{name}이(가) 생각하는 중"),
     ("downloadFilesTitle", "Download files", "下载文件", "ファイルをダウンロード", "파일 다운로드"),
     ("downloadChoose", "Choose which files to download.", "选择要下载的文件。", "ダウンロードするファイルを選んでください。", "다운로드할 파일을 선택하세요."),
@@ -404,6 +411,13 @@ ENTRIES = [
     ("lockPassword", "Password", "密码", "パスワード", "비밀번호"),
     ("lockWrongPassword", "Wrong password. Try again.", "密码错误，请重试。", "パスワードが違います。もう一度お試しください。", "비밀번호가 틀렸습니다. 다시 시도하세요."),
     ("lockUnlock", "Unlock", "解锁", "ロック解除", "잠금 해제"),
+    ("biometricUnlockTitle", "Fingerprint unlock", "指纹解锁", "指紋でロック解除", "지문 잠금 해제"),
+    ("biometricUnlockDesc", "Unlock the app with your fingerprint instead of typing the password. The password stays as a fallback.", "用指纹解锁应用，无需输入密码。密码仍作为兜底方式保留。", "パスワードを入力する代わりに、指紋でアプリのロックを解除します。パスワードは予備として残ります。", "비밀번호를 입력하는 대신 지문으로 앱 잠금을 해제합니다. 비밀번호는 예비 수단으로 유지됩니다."),
+    ("biometricUse", "Use fingerprint", "使用指纹", "指紋を使う", "지문 사용"),
+    ("biometricPromptTitle", "Unlock Lucent", "解锁 Lucent", "Lucent のロックを解除", "Lucent 잠금 해제"),
+    ("biometricPromptSubtitle", "Verify your identity to unlock", "验证身份以解锁", "本人確認してロックを解除します", "본인 확인 후 잠금을 해제하세요"),
+    ("biometricUsePassword", "Use password", "使用密码", "パスワードを使う", "비밀번호 사용"),
+    ("biometricFailed", "Fingerprint authentication failed", "指纹验证失败", "指紋認証に失敗しました", "지문 인증에 실패했습니다"),
     ("lockForgotPassword", "Forgot password?", "忘记密码？", "パスワードをお忘れですか？", "비밀번호를 잊으셨나요?"),
     ("lockNoSecurityQuestion", "No security question was set for this lock, so the password can't be recovered on this device.", "此锁未设置安全问题，因此无法在此设备上找回密码。", "このロックにはセキュリティの質問が設定されていないため、この端末ではパスワードを復元できません。", "이 잠금에는 보안 질문이 설정되어 있지 않아 이 기기에서는 비밀번호를 복구할 수 없습니다."),
     ("lockAnswerToReset", "Answer your security question to set a new password.", "回答安全问题以设置新密码。", "セキュリティの質問に答えて新しいパスワードを設定してください。", "보안 질문에 답하여 새 비밀번호를 설정하세요."),
@@ -546,7 +560,7 @@ ENTRIES = [
     ("settingsNetworkTitle", "Networking", "联网", "ネットワーク", "네트워크"),
     ("settingsNetworkSub", "Web search for the cloud assistant", "云端助手的联网搜索", "クラウドアシスタントのウェブ検索", "클라우드 어시스턴트 웹 검색"),
     ("settingsLocalModelTitle", "Local model (experimental)", "本地模型（实验性）", "ローカルモデル（実験的）", "로컬 모델(실험적)"),
-    ("settingsLocalModelSub", "Run the assistant on-device, no API needed", "在设备上本地运行助手，无需 API", "端末上でアシスタントを実行、API不要", "기기에서 어시스턴트 실행, API 불필요"),
+    ("settingsLocalModelSub", "Run the assistant on-device, no network needed", "在设备上本地运行助手，无需网络", "端末上でアシスタントを実行、ネット接続不要", "기기에서 어시스턴트 실행, 네트워크 불필요"),
     ("lmExperimentalNote", "Experimental — on-device inference is new and can be slow or unstable on some phones.", "实验性功能——端侧推理尚在早期，在部分手机上可能较慢或不稳定。", "実験的機能 — 端末上での推論はまだ新しく、一部の端末では遅かったり不安定な場合があります。", "실험적 기능 — 온디바이스 추론은 아직 초기 단계로 일부 기기에서는 느리거나 불안정할 수 있습니다."),
 
     # =====================================================================================
@@ -561,7 +575,7 @@ ENTRIES = [
     ("lmToolsWarnBody", "The on-device assistant will be able to create and edit your notes and tasks. This adds extra processing to each reply, so it can be slower on older phones, and very small models may not follow it reliably. You can turn it off any time.", "本地助手将能够新建和编辑你的笔记与任务。这会给每次回复增加额外计算，旧手机上可能变慢，非常小的模型也可能无法稳定遵循。你可以随时关闭。", "オンデバイスのアシスタントがメモやタスクを作成・編集できるようになります。返信ごとに処理が増えるため古い端末では遅くなることがあり、とても小さいモデルでは正しく従えない場合があります。いつでもオフにできます。", "온디바이스 어시스턴트가 메모와 할 일을 만들고 편집할 수 있게 됩니다. 답변마다 처리가 늘어 오래된 기기에서는 느려질 수 있고, 아주 작은 모델은 안정적으로 따르지 못할 수 있습니다. 언제든지 끌 수 있습니다."),
     ("lmGpuToggle", "Use the GPU", "使用 GPU", "GPUを使用", "GPU 사용"),
     ("lmGpuNeedsModel", "Import a model first to choose the GPU.", "请先导入模型，才能选择使用 GPU。", "GPUを選ぶには、まずモデルをインポートしてください。", "GPU를 선택하려면 먼저 모델을 가져오세요."),
-    ("lmGpuToggleDesc", "Off by default — the CPU is used, which runs on every device and is the most stable. The GPU can be faster on some phones but may be unstable.", "默认关闭——使用 CPU，兼容所有设备且最稳定。GPU 在部分手机上更快，但可能不稳定。", "デフォルトはオフ——CPUを使用し、あらゆる端末で動作し最も安定します。GPUは一部の端末で高速ですが、不安定な場合があります。", "기본값은 꺼짐 — CPU를 사용하며 모든 기기에서 작동하고 가장 안정적입니다. GPU는 일부 기기에서 더 빠르지만 불안정할 수 있습니다."),
+    ("lmGpuToggleDesc", "Off by default — the CPU is used, which runs on every device and is the most stable. The GPU can be faster on some devices but may be unstable.", "默认关闭——使用 CPU，兼容所有设备且最稳定。GPU 在部分设备上更快，但可能不稳定。", "デフォルトはオフ——CPUを使用し、あらゆる端末で動作し最も安定します。GPUは一部の端末で高速ですが、不安定な場合があります。", "기본값은 꺼짐 — CPU를 사용하며 모든 기기에서 작동하고 가장 안정적입니다. GPU는 일부 기기에서 더 빠르지만 불안정할 수 있습니다."),
     ("lmGpuWarnTitle", "Switch the local model to the GPU?", "将本地模型切换到 GPU？", "ローカルモデルをGPUに切り替えますか？", "로컬 모델을 GPU로 전환할까요?"),
     ("lmGpuWarnBody", "GPU (Vulkan) acceleration can be faster on some devices, but graphics drivers vary and it may be less stable on others. If your device can't run it, the model automatically falls back to the CPU. The CPU option is the safest and works everywhere. You can switch back any time.", "GPU（Vulkan）加速在部分设备上更快，但显卡驱动差异大，在另一些设备上可能不太稳定。如果你的设备无法运行，模型会自动回退到 CPU。CPU 最稳、处处可用。你可以随时切回。", "GPU（Vulkan）アクセラレーションは一部の端末で高速ですが、グラフィックスドライバーは端末ごとに異なり、安定しない場合があります。実行できない端末では自動的にCPUに戻ります。CPUが最も安全で、どの端末でも動作します。いつでも戻せます。", "GPU(Vulkan) 가속은 일부 기기에서 더 빠르지만, 그래픽 드라이버가 기기마다 달라 덜 안정적일 수 있습니다. 기기가 실행할 수 없으면 모델이 자동으로 CPU로 되돌아갑니다. CPU가 가장 안전하고 모든 기기에서 작동합니다. 언제든지 되돌릴 수 있습니다."),
     ("lmWarnEnableAnyway", "Turn on", "开启", "オンにする", "켜기"),
@@ -647,6 +661,7 @@ ENTRIES = [
     ("apiConnectionTitle", "API connection", "API 连接", "API接続", "API 연결"),
     ("fieldBaseUrl", "Base URL", "基础 URL", "ベースURL", "기본 URL"),
     ("fetchModels", "Fetch available models", "获取可用模型", "利用可能なモデルを取得", "사용 가능한 모델 가져오기"),
+    ("apiUrlRequired", "Enter the API address first.", "请先填写 API 地址。", "先に API アドレスを入力してください。", "먼저 API 주소를 입력하세요."),
     ("fieldModel", "Model", "模型", "モデル", "모델"),
     ("chooseModel", "Choose a model", "选择模型", "モデルを選択", "모델 선택"),
     ("currentModelHint(model: String)", "Currently: {model}. Fetch models to change it.", "当前：{model}。获取模型列表后可更改。", "現在：{model}。変更するにはモデル一覧を取得してください。", "현재: {model}. 변경하려면 모델 목록을 가져오세요."),
@@ -889,6 +904,15 @@ ENTRIES = [
     ("ccAddSubtask(item: String, title: String)", "Add the subtask \"{item}\" to \"{title}\"", "向“{title}”添加子任务“{item}”", "「{title}」にサブタスク「{item}」を追加", "\"{title}\"에 하위 작업 \"{item}\" 추가"),
     ("ccCheckSubtask(item: String, title: String)", "Check off the subtask \"{item}\" on \"{title}\"", "勾选“{title}”的子任务“{item}”", "「{title}」のサブタスク「{item}」にチェック", "\"{title}\"의 하위 작업 \"{item}\" 체크"),
     ("ccRemoveSubtask(item: String, title: String)", "Remove the subtask \"{item}\" from \"{title}\"", "从“{title}”移除子任务“{item}”", "「{title}」からサブタスク「{item}」を削除", "\"{title}\"에서 하위 작업 \"{item}\" 제거"),
+    ("ccEditSubtask(item: String, title: String)", "Reword the subtask \"{item}\" on \"{title}\"", "修改“{title}”的子任务“{item}”的文本", "「{title}」のサブタスク「{item}」の文言を変更", "\"{title}\"의 하위 작업 \"{item}\" 문구 변경"),
+    ("ccReopenTask(title: String)", "Mark the task \"{title}\" as not done", "将任务“{title}”标记为未完成", "タスク「{title}」を未完了に戻す", "작업 \"{title}\"을(를) 미완료로 되돌리기"),
+    ("ccArchiveNote(title: String)", "Archive the note \"{title}\"", "归档笔记“{title}”", "メモ「{title}」をアーカイブ", "노트 \"{title}\" 보관"),
+    ("ccUnarchiveNote(title: String)", "Unarchive the note \"{title}\"", "取消归档笔记“{title}”", "メモ「{title}」のアーカイブを解除", "노트 \"{title}\" 보관 해제"),
+    ("ccSetNoteColor(title: String, color: String)", "Set the colour of \"{title}\" to {color}", "将“{title}”的颜色设为 {color}", "「{title}」の色を {color} に設定", "\"{title}\"의 색상을 {color}(으)로 설정"),
+    ("ccAddNoteItem(item: String, title: String)", "Add the item \"{item}\" to the note \"{title}\"", "向笔记“{title}”添加清单项“{item}”", "メモ「{title}」に項目「{item}」を追加", "노트 \"{title}\"에 항목 \"{item}\" 추가"),
+    ("ccCheckNoteItem(item: String, title: String)", "Check off the item \"{item}\" on the note \"{title}\"", "勾选笔记“{title}”的清单项“{item}”", "メモ「{title}」の項目「{item}」にチェック", "노트 \"{title}\"의 항목 \"{item}\" 체크"),
+    ("ccEditNoteItem(item: String, title: String)", "Reword the item \"{item}\" on the note \"{title}\"", "修改笔记“{title}”的清单项“{item}”的文本", "メモ「{title}」の項目「{item}」の文言を変更", "노트 \"{title}\"의 항목 \"{item}\" 문구 변경"),
+    ("ccRemoveNoteItem(item: String, title: String)", "Remove the item \"{item}\" from the note \"{title}\"", "从笔记“{title}”移除清单项“{item}”", "メモ「{title}」から項目「{item}」を削除", "노트 \"{title}\"에서 항목 \"{item}\" 제거"),
     ("ccSaveFileOnTask(file: String, title: String)", "Save the file \"{file}\" onto the task \"{title}\"", "将文件“{file}”保存到任务“{title}”", "ファイル「{file}」をタスク「{title}」に保存", "파일 \"{file}\"을(를) 할 일 \"{title}\"에 저장"),
     ("ccRemoveFileFromTask(file: String, title: String)", "Remove the file \"{file}\" from the task \"{title}\"", "从任务“{title}”移除文件“{file}”", "タスク「{title}」からファイル「{file}」を削除", "할 일 \"{title}\"에서 파일 \"{file}\" 제거"),
     ("ccAttachUploadToTask(title: String)", "Attach your uploaded file to the task \"{title}\"", "将你上传的文件附加到任务“{title}”", "アップロードしたファイルをタスク「{title}」に添付", "업로드한 파일을 할 일 \"{title}\"에 첨부"),
@@ -926,9 +950,6 @@ ENTRIES = [
     ("importedConversationTitle", "Imported conversation", "导入的会话", "インポートした会話", "가져온 대화"),
     ("importSummary(notes: Int, tasks: Int, chats: Int)", "Imported {notes} notes, {tasks} tasks, {chats} chat messages.", "已导入 {notes} 条笔记、{tasks} 个任务、{chats} 条聊天消息。", "メモ{notes}件、タスク{tasks}件、チャットメッセージ{chats}件をインポートしました。", "노트 {notes}개, 할 일 {tasks}개, 채팅 메시지 {chats}개를 가져왔습니다."),
     ("importSettingsRestored", " Settings restored.", " 设置已恢复。", " 設定を復元しました。", " 설정이 복원되었습니다."),
-    ("bkImportedFonts", "Imported fonts", "导入的字体", "インポート済みフォント", "가져온 글꼴"),
-    ("backupFontsRestored(count: Int)", " Restored {count} imported font(s).", "已还原 {count} 个导入的字体。", "インポート済みフォント {count} 件を復元しました。", "가져온 글꼴 {count}개를 복원했습니다."),
-    ("backupModSettingsFontsDesc(size: String)", "Includes your imported font files ({size}), so a restore brings your fonts back too.", "包含已导入的字体文件（{size}），还原时字体也会一并恢复。", "インポート済みのフォントファイル（{size}）を含めるため、復元時にフォントも戻ります。", "가져온 글꼴 파일({size})을 포함하므로 복원 시 글꼴도 함께 복원됩니다."),
     ("importVersionsRestored(count: Int)", " ({count} note versions restored.)", "（已恢复 {count} 个笔记版本。）", "（メモのバージョン{count}件を復元。）", " (노트 버전 {count}개 복원됨.)"),
     ("importDuplicatesSkipped(count: Int)", " ({count} duplicate entries skipped.)", "（已跳过 {count} 条重复条目。）", "（重複{count}件をスキップ。）", " (중복 항목 {count}개 건너뜀.)"),
     ("attachmentTooLarge(size: String, limit: String)", "That file is {size}, over the {limit} limit for a single attachment. It wasn't added.", "该文件为 {size}，超过了单个附件 {limit} 的上限，未被添加。", "そのファイルは{size}で、添付1件あたりの上限{limit}を超えています。追加されませんでした。", "해당 파일은 {size}(으)로 첨부 파일당 {limit} 제한을 초과하여 추가되지 않았습니다."),
@@ -936,7 +957,13 @@ ENTRIES = [
     # =====================================================================================
     # Round: local-assistant gating, floating capsule, backup coverage, localized search
     # =====================================================================================
-    ("lmTextOnlyNote", "Text only: the local assistant reads and writes text. It cannot see images, PDFs, audio or any other attachment — multimodal models are not supported in local mode. Attach files to the cloud assistant instead.", "仅支持纯文本：本地助手只能读写文字，无法识别图片、PDF、音频或任何其他附件——本地模式不支持多模态模型。需要发送附件时，请改用云端助手。", "テキスト専用：ローカルアシスタントは文字の読み書きのみ行えます。画像・PDF・音声などの添付は認識できません（ローカルモードはマルチモーダルモデルに対応していません）。添付が必要な場合はクラウドアシスタントをご利用ください。", "텍스트 전용: 로컬 어시스턴트는 글만 읽고 씁니다. 이미지, PDF, 오디오 등 첨부 파일은 인식할 수 없습니다(로컬 모드는 멀티모달 모델을 지원하지 않습니다). 첨부가 필요하면 클라우드 어시스턴트를 사용하세요."),
+    "// TODO(local-multimodal): this note describes a TEMPORARY gap, not a permanent design decision.",
+    "// The on-device engine currently loads text-only GGUF models, so images, PDFs and audio are not",
+    "// passed to it. Multimodal on-device support (an mmproj/vision projector alongside the model,",
+    "// and an attachment path into LocalLlm.generate) is planned for a future release. When it lands,",
+    "// rewrite this string in all four languages and remove the \"for now\" framing — leaving a",
+    "// temporary limitation described as permanent is how a shipped feature stays hidden.",
+    ("lmTextOnlyNote", "Text only, for now: the local assistant reads and writes text, and cannot yet see images, PDFs, audio or other attachments. This is a current limitation of on-device mode rather than a permanent one — multimodal support for local models is planned for a future version. Until then, attach files to the cloud assistant instead.", "目前仅支持纯文本：本地助手只能读写文字，暂时无法识别图片、PDF、音频或其他附件。这是本地模式现阶段的限制，并非永久如此——本地模型的多模态支持已列入后续版本计划。在此之前，需要发送附件请改用云端助手。", "現在はテキスト専用：ローカルアシスタントは文字の読み書きのみ行え、画像・PDF・音声などの添付はまだ認識できません。これはローカルモードの現時点での制限であり、恒久的なものではありません。ローカルモデルのマルチモーダル対応は今後のバージョンで予定しています。それまでは添付が必要な場合クラウドアシスタントをご利用ください。", "현재는 텍스트 전용: 로컬 어시스턴트는 글만 읽고 쓰며, 이미지·PDF·오디오 등 첨부 파일은 아직 인식하지 못합니다. 이것은 로컬 모드의 현재 제약일 뿐 영구적인 것은 아니며, 로컬 모델의 멀티모달 지원은 향후 버전에 추가될 예정입니다. 그전까지 첨부가 필요하면 클라우드 어시스턴트를 사용하세요."),
     ("lmSubTogglesResetNote", "Tools and GPU always start off each time you turn the local assistant on, even if you had them on last time — so a heavy option can never be inherited silently.", "每次开启本地助手时，「允许使用工具」与「使用 GPU」都会自动回到关闭状态，即使上一次开启过也是如此——避免高开销选项被悄悄继承。", "ローカルアシスタントをオンにするたび、「ツールの使用」と「GPU」は前回オンにしていても必ずオフから始まります。負荷の高い設定が知らないうちに引き継がれることはありません。", "로컬 어시스턴트를 켤 때마다 '도구 사용'과 'GPU'는 지난번에 켜 두었더라도 항상 꺼진 상태로 시작합니다. 부담이 큰 옵션이 조용히 이어지지 않도록 하기 위함입니다."),
     ("lmEnableToConfigureNote", "Turn on the switch above to import a model and configure the local assistant.", "开启上方的开关后，即可导入模型并配置本地助手。", "上のスイッチをオンにすると、モデルのインポートとローカルアシスタントの設定ができます。", "위 스위치를 켜면 모델을 가져오고 로컬 어시스턴트를 설정할 수 있습니다."),
     ("lmNeedModelNotice", "The local assistant is on but no model is imported yet. Import a GGUF model below — until then the assistant has nothing to answer with.", "本地助手已开启，但尚未导入模型。请在下方导入一个 GGUF 模型——在此之前助手无法作答。", "ローカルアシスタントはオンですが、モデルがまだインポートされていません。下でGGUFモデルをインポートしてください。それまではアシスタントは応答できません。", "로컬 어시스턴트는 켜져 있지만 아직 가져온 모델이 없습니다. 아래에서 GGUF 모델을 가져오세요. 그전까지는 어시스턴트가 답변할 수 없습니다."),
@@ -956,4 +983,39 @@ ENTRIES = [
     ("apiNoneTitle", "No API saved", "尚无已保存的 API", "保存されたAPIがありません", "저장된 API 없음"),
     ("apiNoneBody", "You've deleted every saved API. Add one to use the cloud assistant, or import a local model to chat offline.", "你已删除全部已保存的 API。添加一个即可使用云端助手，或导入本地模型离线聊天。", "保存済みのAPIをすべて削除しました。クラウドアシスタントを使うには1つ追加するか、ローカルモデルをインポートしてオフラインで会話してください。", "저장된 API를 모두 삭제했습니다. 클라우드 어시스턴트를 사용하려면 하나를 추가하거나, 로컬 모델을 가져와 오프라인으로 대화하세요."),
     ("helpLocalizedFilters", "Filters also work in your own language — type 完成 / 完了 / 완료 instead of is:done. Wrap a word in quotes to search for it literally.", "筛选词也支持用你自己的语言输入——可以直接输入「已完成」，无需 is:done。用引号括起来则按字面搜索。", "フィルターは日本語でも使えます。is:done の代わりに「完了」と入力できます。引用符で囲むと、その語をそのまま検索します。", "필터는 한국어로도 사용할 수 있습니다. is:done 대신 '완료'라고 입력하면 됩니다. 따옴표로 묶으면 글자 그대로 검색합니다."),
+    "",
+    "// ---- Editable tool confirmations, declined actions, and modular backup ----",
+    ("assistantDeclinedReply(details: String)", "You said no, so I didn’t do it — {details}. Nothing was changed. Tell me if you’d like it done differently.", "你拒绝了这个操作，所以我没有执行——{details}。什么都没有改变。如果想换个方式，告诉我就行。", "ご承認いただけなかったので実行していません——{details}。何も変更されていません。別の形でご希望でしたら教えてください。", "거절하셔서 실행하지 않았습니다 — {details}. 변경된 것은 없습니다. 다른 방식을 원하시면 말씀해 주세요."),
+    ("confirmEditTitleLabel", "Title", "标题", "タイトル", "제목"),
+    ("confirmEditNewTitleLabel", "New title", "新标题", "新しいタイトル", "새 제목"),
+    ("confirmEditItemLabel", "Item", "条目", "項目", "항목"),
+    ("confirmEditNewTextLabel", "New text", "新文本", "新しいテキスト", "새 텍스트"),
+    ("confirmEditHint", "You can edit this before confirming.", "确认前可以先修改。", "確認前に編集できます。", "확인하기 전에 수정할 수 있습니다."),
+    ("backupChooseWhat", "What to include", "备份内容", "バックアップ対象", "백업 항목"),
+    ("restoreChooseWhat", "What to restore", "还原内容", "復元対象", "복원 항목"),
+    ("backupModNotes", "Notes", "笔记", "メモ", "노트"),
+    ("backupModTasks", "Tasks", "任务", "タスク", "할 일"),
+    ("backupModChats", "Assistant conversations", "助手对话", "アシスタントの会話", "어시스턴트 대화"),
+    ("backupModSettings", "App settings", "应用设置", "アプリ設定", "앱 설정"),
+    ("backupModApi", "API profiles and keys", "API 配置与密钥", "APIプロファイルとキー", "API 프로필과 키"),
+    ("backupModLocalAssistant", "Local assistant settings", "本地助手设置", "ローカルアシスタント設定", "로컬 어시스턴트 설정"),
+    ("backupModLocalModelFiles", "Local model files", "本地模型文件", "ローカルモデルのファイル", "로컬 모델 파일"),
+    ("backupModLocalModelFilesDesc(size: String)", "Includes the imported .gguf files themselves ({size}), so a restore brings the model back too. This makes the backup very large — leave it off if you only want your notes and settings.", "包含已导入的 .gguf 模型文件本体（{size}），还原时模型也会一并恢复。这会使备份文件非常大——如果只想备份笔记和设置，请保持关闭。", "インポート済みの .gguf ファイル自体（{size}）を含めるため、復元時にモデルも戻ります。バックアップが非常に大きくなるので、メモと設定だけでよければオフのままにしてください。", "가져온 .gguf 파일 자체({size})를 포함하므로 복원 시 모델도 함께 돌아옵니다. 백업 파일이 매우 커지므로 노트와 설정만 필요하다면 꺼 두세요."),
+    ("backupSelectionEmpty", "Pick at least one thing to include.", "请至少选择一项内容。", "少なくとも 1 つ選んでください。", "최소 한 가지를 선택하세요."),
+    ("backupModelFilesRestored(count: Int)", " Restored {count} local model file(s).", "已还原 {count} 个本地模型文件。", "ローカルモデルファイル {count} 件を復元しました。", "로컬 모델 파일 {count}개를 복원했습니다."),
+    ("backupModelsInFile(count: Int)", "{count} local model file(s)", "{count} 个本地模型文件", "ローカルモデルファイル {count} 件", "로컬 모델 파일 {count}개"),
+    ("bkImportedFonts", "Imported fonts", "导入的字体", "インポート済みフォント", "가져온 글꼴"),
+    ("backupFontsRestored(count: Int)", " Restored {count} imported font(s).", "已还原 {count} 个导入的字体。", "インポート済みフォント {count} 件を復元しました。", "가져온 글꼴 {count}개를 복원했습니다."),
+    ("backupModSettingsFontsDesc(size: String)", "Includes your imported font files ({size}), so a restore brings your fonts back too.", "包含已导入的字体文件（{size}），还原时字体也会一并恢复。", "インポート済みのフォントファイル（{size}）を含めるため、復元時にフォントも戻ります。", "가져온 글꼴 파일({size})을 포함하므로 복원 시 글꼴도 함께 복원됩니다."),
+    "",
+    "// ---- Per-item backup selection (second-level picker) ----",
+    ("backupChooseItems", "Choose…", "选择…", "選択…", "선택…"),
+    ("backupNOfM(chosen: Int, total: Int)", "{chosen} of {total} selected", "已选 {chosen}/{total}", "{total} 件中 {chosen} 件を選択", "{total}개 중 {chosen}개 선택"),
+    ("backupPickNotesTitle", "Which notes?", "选择要备份的笔记", "バックアップするメモ", "백업할 노트"),
+    ("backupPickTasksTitle", "Which tasks?", "选择要备份的任务", "バックアップするタスク", "백업할 할 일"),
+    ("backupPickChatsTitle", "Which conversations?", "选择要备份的对话", "バックアップする会話", "백업할 대화"),
+    ("backupPickApiTitle", "Which API profiles?", "选择要备份的 API 配置", "バックアップする API プロファイル", "백업할 API 프로필"),
+    ("backupImportApiLimit(canAdd: Int, max: Int)", "Over the {max}-profile limit — choose up to {canAdd} to import:", "超过 {max} 个配置上限——请选择最多 {canAdd} 个导入：", "{max} 件の上限を超えています。インポートする {canAdd} 件までを選択してください：", "{max}개 제한을 초과했습니다. 가져올 항목을 최대 {canAdd}개 선택하세요:"),
+    ("backupImportApiFull(max: Int)", "You already have the maximum of {max} API profiles. Remove one first to import more.", "你已有 {max} 个 API 配置（已达上限）。请先删除一个再导入。", "API プロファイルは既に上限の {max} 件です。インポートするには先に 1 件削除してください。", "API 프로필이 이미 최대 {max}개입니다. 더 가져오려면 먼저 하나를 삭제하세요."),
+    ("backupNothingToPick", "There is nothing here to back up yet.", "目前没有可备份的内容。", "バックアップできるものはまだありません。", "아직 백업할 항목이 없습니다."),
 ]

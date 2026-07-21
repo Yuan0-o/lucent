@@ -78,6 +78,11 @@ fun <T> ExportSelectionScreen(
     val onGradient = LocalOnGradient.current
     val onGradientMuted = LocalOnGradientMuted.current
 
+    // Whether any user-imported fonts exist, read once per visit: the PDF hint below states what
+    // a PDF written right now would embed (font library task; see DocumentExport.loadPdfFonts).
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val hasImportedFonts = remember { com.lucent.app.data.FontStore.fonts(context).isNotEmpty() }
+
     var query by remember { mutableStateOf("") }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     // Which attachments are ticked for embedding, keyed by "itemId\u0000attachmentName" so two items
@@ -258,6 +263,20 @@ fun <T> ExportSelectionScreen(
                     label = { Text(fmt.label) }
                 )
             }
+        }
+
+        // Desktop-only truth-telling for PDF (font library task): a PDF embeds the user's imported
+        // fonts — or, with none imported, falls back to a Latin-only face (see
+        // DocumentExport.loadPdfFonts). Whichever holds, it is said HERE, while PDF is being
+        // chosen, rather than discovered later in a file full of "\u00B7" placeholders.
+        if (selectedFormat == com.lucent.app.data.ExportFormat.PDF) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                if (hasImportedFonts) com.lucent.app.i18n.S.exportPdfFontHint
+                else com.lucent.app.i18n.S.exportPdfNoFontHint,
+                color = onGradientMuted,
+                fontSize = 12.sp
+            )
         }
 
         // The format picker is now the last element (Export moved up to the title row, task E1), so a

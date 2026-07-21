@@ -4,6 +4,9 @@
 Catalog entry forms:
   ("key", en, zh, ja, ko)                      -> open val key: String = "en" / override ...
   ("key(param: Type, ...)", en, zh, ja, ko)    -> open fun key(...): String = "en with ${param}"
+  "// comment"                                  -> emitted verbatim (indented) into Tr ONLY,
+                                                   so notes travel with the keys they describe;
+                                                   an empty string item emits a blank line.
 Templates use {param}; converted to Kotlin ${param}. Quotes/backslashes are escaped.
 A missing (None) translation simply omits the override -> falls back to English.
 """
@@ -34,6 +37,8 @@ def fn_name(key: str) -> str:
 
 seen = set()
 for e in ENTRIES:
+    if isinstance(e, str):
+        continue  # a comment line, not a key
     k = fn_name(e[0]) if is_fn(e[0]) else e[0]
     if k in seen:
         sys.exit(f"DUPLICATE KEY: {k}")
@@ -54,6 +59,8 @@ def override_decl(key, val):
 def lang_object(name, idx):
     lines = [f"object {name} : Tr() {{"]
     for e in ENTRIES:
+        if isinstance(e, str):
+            continue  # comments are emitted into Tr only
         d = override_decl(e[0], e[idx])
         if d:
             lines.append(d)
@@ -173,7 +180,10 @@ object LDates {
 out = [header]
 out.append("open class Tr {")
 for e in ENTRIES:
-    out.append(base_decl(e[0], e[1]))
+    if isinstance(e, str):
+        out.append("    " + e if e else "")
+    else:
+        out.append(base_decl(e[0], e[1]))
 out.append("}")
 out.append("")
 out.append("object En : Tr()")

@@ -885,7 +885,7 @@ open class Tr {
     // and an attachment path into LocalLlm.generate) is planned for a future release. When it lands,
     // rewrite this string in all four languages and remove the "for now" framing — leaving a
     // temporary limitation described as permanent is how a shipped feature stays hidden.
-    open val lmTextOnlyNote: String = "Text only, for now: the local assistant reads and writes text, and cannot yet see images, PDFs, audio or other attachments. This is a current limitation of on-device mode rather than a permanent one \u2014 multimodal support for local models is planned for a future version. Until then, attach files to the cloud assistant instead."
+    open val lmTextOnlyNote: String = "Text only, for now: the local assistant reads and writes text, and cannot yet see images, PDFs, audio or other attachments. This is a current limitation of on-device mode rather than a permanent one — multimodal support for local models is planned for a future version. Until then, attach files to the cloud assistant instead."
     open val lmSubTogglesResetNote: String = "Tools and GPU always start off each time you turn the local assistant on, even if you had them on last time — so a heavy option can never be inherited silently."
     open val lmEnableToConfigureNote: String = "Turn on the switch above to import a model and configure the local assistant."
     open val lmNeedModelNotice: String = "The local assistant is on but no model is imported yet. Import a GGUF model below — until then the assistant has nothing to answer with."
@@ -937,10 +937,8 @@ open class Tr {
     open val backupPickTasksTitle: String = "Which tasks?"
     open val backupPickChatsTitle: String = "Which conversations?"
     open val backupPickApiTitle: String = "Which API profiles?"
-    open fun backupImportApiLimit(canAdd: Int, max: Int): String =
-        "Over the ${max}-profile limit — choose up to ${canAdd} to import:"
-    open fun backupImportApiFull(max: Int): String =
-        "You already have the maximum of ${max} API profiles. Remove one first to import more."
+    open fun backupImportApiLimit(canAdd: Int, max: Int): String = "Over the ${max}-profile limit — choose up to ${canAdd} to import:"
+    open fun backupImportApiFull(max: Int): String = "You already have the maximum of ${max} API profiles. Remove one first to import more."
     open val backupNothingToPick: String = "There is nothing here to back up yet."
 }
 
@@ -1738,8 +1736,6 @@ object Zh : Tr() {
     override val apiNoneTitle: String = "尚无已保存的 API"
     override val apiNoneBody: String = "你已删除全部已保存的 API。添加一个即可使用云端助手，或导入本地模型离线聊天。"
     override val helpLocalizedFilters: String = "筛选词也支持用你自己的语言输入——可以直接输入「已完成」，无需 is:done。用引号括起来则按字面搜索。"
-
-    // ---- Editable tool confirmations, declined actions, and modular backup ----
     override fun assistantDeclinedReply(details: String): String = "你拒绝了这个操作，所以我没有执行——${details}。什么都没有改变。如果想换个方式，告诉我就行。"
     override val confirmEditTitleLabel: String = "标题"
     override val confirmEditNewTitleLabel: String = "新标题"
@@ -1762,18 +1758,14 @@ object Zh : Tr() {
     override val bkImportedFonts: String = "导入的字体"
     override fun backupFontsRestored(count: Int): String = "已还原 ${count} 个导入的字体。"
     override fun backupModSettingsFontsDesc(size: String): String = "包含已导入的字体文件（${size}），还原时字体也会一并恢复。"
-
-    // ---- Per-item backup selection (second-level picker) ----
     override val backupChooseItems: String = "选择…"
     override fun backupNOfM(chosen: Int, total: Int): String = "已选 ${chosen}/${total}"
     override val backupPickNotesTitle: String = "选择要备份的笔记"
     override val backupPickTasksTitle: String = "选择要备份的任务"
     override val backupPickChatsTitle: String = "选择要备份的对话"
     override val backupPickApiTitle: String = "选择要备份的 API 配置"
-    override fun backupImportApiLimit(canAdd: Int, max: Int): String =
-        "超过 ${max} 个配置上限——请选择最多 ${canAdd} 个导入："
-    override fun backupImportApiFull(max: Int): String =
-        "你已有 ${max} 个 API 配置（已达上限）。请先删除一个再导入。"
+    override fun backupImportApiLimit(canAdd: Int, max: Int): String = "超过 ${max} 个配置上限——请选择最多 ${canAdd} 个导入："
+    override fun backupImportApiFull(max: Int): String = "你已有 ${max} 个 API 配置（已达上限）。请先删除一个再导入。"
     override val backupNothingToPick: String = "目前没有可备份的内容。"
 }
 
@@ -2569,8 +2561,6 @@ object Ja : Tr() {
     override val apiNoneTitle: String = "保存されたAPIがありません"
     override val apiNoneBody: String = "保存済みのAPIをすべて削除しました。クラウドアシスタントを使うには1つ追加するか、ローカルモデルをインポートしてオフラインで会話してください。"
     override val helpLocalizedFilters: String = "フィルターは日本語でも使えます。is:done の代わりに「完了」と入力できます。引用符で囲むと、その語をそのまま検索します。"
-
-    // ---- Editable tool confirmations, declined actions, and modular backup ----
     override fun assistantDeclinedReply(details: String): String = "ご承認いただけなかったので実行していません——${details}。何も変更されていません。別の形でご希望でしたら教えてください。"
     override val confirmEditTitleLabel: String = "タイトル"
     override val confirmEditNewTitleLabel: String = "新しいタイトル"
@@ -2593,18 +2583,14 @@ object Ja : Tr() {
     override val bkImportedFonts: String = "インポート済みフォント"
     override fun backupFontsRestored(count: Int): String = "インポート済みフォント ${count} 件を復元しました。"
     override fun backupModSettingsFontsDesc(size: String): String = "インポート済みのフォントファイル（${size}）を含めるため、復元時にフォントも戻ります。"
-
-    // ---- Per-item backup selection (second-level picker) ----
     override val backupChooseItems: String = "選択…"
     override fun backupNOfM(chosen: Int, total: Int): String = "${total} 件中 ${chosen} 件を選択"
     override val backupPickNotesTitle: String = "バックアップするメモ"
     override val backupPickTasksTitle: String = "バックアップするタスク"
     override val backupPickChatsTitle: String = "バックアップする会話"
     override val backupPickApiTitle: String = "バックアップする API プロファイル"
-    override fun backupImportApiLimit(canAdd: Int, max: Int): String =
-        "${max} 件の上限を超えています。インポートする ${canAdd} 件までを選択してください："
-    override fun backupImportApiFull(max: Int): String =
-        "API プロファイルは既に上限の ${max} 件です。インポートするには先に 1 件削除してください。"
+    override fun backupImportApiLimit(canAdd: Int, max: Int): String = "${max} 件の上限を超えています。インポートする ${canAdd} 件までを選択してください："
+    override fun backupImportApiFull(max: Int): String = "API プロファイルは既に上限の ${max} 件です。インポートするには先に 1 件削除してください。"
     override val backupNothingToPick: String = "バックアップできるものはまだありません。"
 }
 
@@ -3400,8 +3386,6 @@ object Ko : Tr() {
     override val apiNoneTitle: String = "저장된 API 없음"
     override val apiNoneBody: String = "저장된 API를 모두 삭제했습니다. 클라우드 어시스턴트를 사용하려면 하나를 추가하거나, 로컬 모델을 가져와 오프라인으로 대화하세요."
     override val helpLocalizedFilters: String = "필터는 한국어로도 사용할 수 있습니다. is:done 대신 '완료'라고 입력하면 됩니다. 따옴표로 묶으면 글자 그대로 검색합니다."
-
-    // ---- Editable tool confirmations, declined actions, and modular backup ----
     override fun assistantDeclinedReply(details: String): String = "거절하셔서 실행하지 않았습니다 — ${details}. 변경된 것은 없습니다. 다른 방식을 원하시면 말씀해 주세요."
     override val confirmEditTitleLabel: String = "제목"
     override val confirmEditNewTitleLabel: String = "새 제목"
@@ -3424,17 +3408,13 @@ object Ko : Tr() {
     override val bkImportedFonts: String = "가져온 글꼴"
     override fun backupFontsRestored(count: Int): String = "가져온 글꼴 ${count}개를 복원했습니다."
     override fun backupModSettingsFontsDesc(size: String): String = "가져온 글꼴 파일(${size})을 포함하므로 복원 시 글꼴도 함께 복원됩니다."
-
-    // ---- Per-item backup selection (second-level picker) ----
     override val backupChooseItems: String = "선택…"
     override fun backupNOfM(chosen: Int, total: Int): String = "${total}개 중 ${chosen}개 선택"
     override val backupPickNotesTitle: String = "백업할 노트"
     override val backupPickTasksTitle: String = "백업할 할 일"
     override val backupPickChatsTitle: String = "백업할 대화"
     override val backupPickApiTitle: String = "백업할 API 프로필"
-    override fun backupImportApiLimit(canAdd: Int, max: Int): String =
-        "${max}개 제한을 초과했습니다. 가져올 항목을 최대 ${canAdd}개 선택하세요:"
-    override fun backupImportApiFull(max: Int): String =
-        "API 프로필이 이미 최대 ${max}개입니다. 더 가져오려면 먼저 하나를 삭제하세요."
+    override fun backupImportApiLimit(canAdd: Int, max: Int): String = "${max}개 제한을 초과했습니다. 가져올 항목을 최대 ${canAdd}개 선택하세요:"
+    override fun backupImportApiFull(max: Int): String = "API 프로필이 이미 최대 ${max}개입니다. 더 가져오려면 먼저 하나를 삭제하세요."
     override val backupNothingToPick: String = "아직 백업할 항목이 없습니다."
 }
