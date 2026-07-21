@@ -104,6 +104,11 @@ object LlmClient {
         history: List<ChatTurn>, systemPrompt: String, tools: List<ToolDefinition>,
         onDelta: (String) -> Unit
     ): Result<RawModelReply> = withContext(Dispatchers.IO) {
+        // Cooperative cancellation for the blocking SSE read below: cancelling this coroutine
+        // cannot interrupt a socket read on its own, so without this poll a "stopped" stream
+        // kept being consumed to its very end — pumping the rest of the old reply into the
+        // caller's buffer long after the user had moved on to another conversation.
+        val streamJob = coroutineContext[kotlinx.coroutines.Job]
         var attempt = 0
         while (true) {
             // Buffered text produced *this attempt*. Declared out here so the retry decision can see
@@ -136,9 +141,16 @@ object LlmClient {
                     if (source == null) {
                         Result.failure(ApiNetworkException("Empty response body", null))
                     } else {
-                        streamBody(spec, source, fullText, openAiToolAcc, anthropicToolAcc,
-                            onImage = { m, d -> returnedImageMime = m; returnedImageData = d },
-                            onDelta = onDelta)
+                        try {
+                            streamBody(spec, source, fullText, openAiToolAcc, anthropicToolAcc,
+                                onImage = { m, d -> returnedImageMime = m; returnedImageData = d },
+                                onDelta = onDelta,
+                                isCancelled = { streamJob?.isActive == false })
+                        } finally {
+                            // Release the connection promptly on every exit — normal exhaustion,
+                            // a parse error, or a cancellation abort mid-stream.
+                            try { response.close() } catch (_: Throwable) {}
+                        }
 
                         val toolCalls = mutableListOf<ToolCallRequest>()
                         (if (spec == ApiSpec.ANTHROPIC) anthropicToolAcc else openAiToolAcc).forEach { (_, acc) ->
@@ -149,6 +161,10 @@ object LlmClient {
                         Result.success(RawModelReply(fullText.toString(), toolCalls, returnedImageMime, returnedImageData))
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // A cancelled turn is not a failure to report: rethrow so the caller's own
+                // cancellation handling runs instead of an error banner being raised for it.
+                throw e
             } catch (e: Exception) {
                 // Wrap connectivity faults so the controller can classify them; leave anything else
                 // (e.g. a JSON parse error) as-is.
@@ -184,11 +200,17 @@ object LlmClient {
         openAiToolAcc: LinkedHashMap<Int, ToolAcc>,
         anthropicToolAcc: LinkedHashMap<Int, ToolAcc>,
         onImage: (String?, String?) -> Unit,
-        onDelta: (String) -> Unit
+        onDelta: (String) -> Unit,
+        isCancelled: () -> Boolean = { false }
     ) {
         var returnedImageMime: String? = null
         var returnedImageData: String? = null
         while (!source.exhausted()) {
+                if (isCancelled()) {
+                    // The caller has been cancelled: stop consuming the stream between SSE
+                    // lines instead of draining the rest of a reply nobody is waiting for.
+                    throw kotlinx.coroutines.CancellationException("stream cancelled")
+                }
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
                 val payload = line.removePrefix("data:").trim()
