@@ -1277,6 +1277,8 @@ fun TasksScreen(active: Boolean = true) {
                 // it as a full-height item, so a drag started anywhere below the header is heard —
                 // and the header can always be pulled back down, whether there are zero tasks or two
                 // hundred.
+                // Wrapped in a Box so the scroll-edge jump buttons can overlay the list (task E2).
+                Box(modifier = Modifier.fillMaxSize()) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize().hazeSource(state = hazeState),
@@ -1321,6 +1323,15 @@ fun TasksScreen(active: Boolean = true) {
                             items(sortedActive, key = { it.id }) { task -> renderCard(task) }
                         }
                     }
+                }
+                ScrollEdgeJumpButtons(
+                    canUp = listState.canScrollBackward,
+                    canDown = listState.canScrollForward,
+                    tint = onGradient,
+                    onUp = { scope.launch { listState.animateScrollToItem(0) } },
+                    onDown = { scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = LocalBottomBarInset.current + 14.dp)
+                )
                 }
             }
         }
