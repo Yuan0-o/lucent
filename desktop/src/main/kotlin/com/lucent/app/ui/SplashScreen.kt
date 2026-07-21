@@ -21,10 +21,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -36,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.sin
 
 /**
@@ -71,16 +75,29 @@ object AppReady {
  * happening now happens behind an animation, and by the time the cat fades the app behind it is
  * built and ready.
  *
+ * ### The cat
+ *
+ * Redrawn from a reference picture: a marshmallow-white kitten with a huge soft head, two little
+ * round ear bumps, dot eyes, airbrushed pink cheeks, a wavy pink mouth, pink whiskers, a
+ * butter-yellow tummy, a curled tail — and a plump blue fish napping on its head, which bobs
+ * gently while the cat is solid. Its paws are NOT floating circles: they are little round mitts
+ * held in front of a wide torso, outer edges flush with the body, overlapping it exactly as in the
+ * reference — so cat-plus-paws reads as one connected plush shape. All the key proportions (body
+ * 0.87 of head width, paw 0.35 of body width, cheeks the widest point) are measured off the picture.
+ *
  * ### The animation
  *
  * About seven and a half seconds, in five movements:
  *
  *  1. **Arrive** (0–0.7s) — the cat pops in with a slight overshoot, the way something alive enters.
- *  2. **Wave** (0.7–2.6s) — its two round paws swing about their shoulders, a cheeky little "hello";
- *     they mirror each other so the greeting reads as two-pawed and symmetric.
- *  3. **Blink** (2.6–3.3s) — a single playful blink: the eyes squeeze shut into happy little arcs and
- *     spring back open, with a tiny squash for character. This lands after the wave and before the
- *     glass, so the cat is unmistakably *itself* right before it transforms.
+ *  2. **Wave** (0.7–2.6s) — both paws swing about their shoulder joints, a cheeky little "hello".
+ *     Because each paw is fused to the body, the swing is a lift of the whole arm about a pivot
+ *     buried deep inside the torso: at any angle the paw still overlaps the body, so the silhouette
+ *     never tears open. The two paws mirror each other, so the greeting reads as a happy,
+ *     symmetric two-pawed pat-pat.
+ *  3. **Blink** (2.6–3.3s) — a single playful blink: the dot eyes squeeze shut into happy little
+ *     arcs and spring back open, with a tiny squash for character. This lands after the wave and
+ *     before the glass, so the cat is unmistakably *itself* right before it transforms.
  *  4. **Become glass** (3.3–6.6s) — the solid cat cross-fades into the app's own material: a
  *     translucent pane tinted by the live palette, a bright rim, and a specular highlight that sweeps
  *     across it as it changes. It also *wobbles* — squashing and stretching, strongest at the
@@ -178,7 +195,9 @@ fun LucentSplash(
         val overshoot = sin(enter * PI.toFloat()) * 0.06f                    // brief bulge past 1.0
         val scaleIn = 0.62f + 0.38f * enterEased + overshoot
 
-        // Wave: the paws swing about their shoulders, tapering off as the blink approaches.
+        // Wave: both arms lift and swing about their shoulder pivots, tapering off as the blink
+        // approaches. The amplitude is gentler than it used to be — the paws are big, body-attached
+        // mitts now, and a small swing of a big arm already reads as an enthusiastic hello.
         val waveT = ((t - ENTER_MS) / (WAVE_END_MS - ENTER_MS)).coerceIn(0f, 1f)
         val waveDeg = sin(waveT * WAVE_CYCLES * 2f * PI.toFloat()) * WAVE_AMP_DEG * (1f - waveT * 0.3f)
 
@@ -195,15 +214,22 @@ fun LucentSplash(
         // Liquid wobble: strongest halfway through the change, nothing at either end.
         val wobble = sin(glass * PI.toFloat()) * 0.055f * sin(t / 90f)
 
+        // The fish naps on the cat's head and bobs very slightly while the cat is solid — a tiny
+        // idle sign of life. The bob settles to zero as the glass takes over, so the silhouette
+        // holds perfectly still through the morph.
+        val fishBob = sin(t / FISH_BOB_MS) * FISH_BOB_AMP * (1f - glassEased)
+
         // Exit: float up and dissolve.
         val exit = ((t - EXIT_START_MS) / (TOTAL_MS - EXIT_START_MS)).coerceIn(0f, 1f)
         val exitEased = exit * exit
         val alpha = (1f - exitEased).coerceIn(0f, 1f) * enterEased.coerceAtLeast(0.001f)
 
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val unit = size.minDimension / 470f
+            // The cat lives in a ~780-unit design space (it grew a fish and much bigger paws, so
+            // the space is larger than the old 470 to keep the same on-screen presence).
+            val unit = size.minDimension / 780f
             val cx = size.width / 2f
-            val cy = size.height / 2f - 30f * unit - exitEased * 90f * unit
+            val cy = size.height / 2f - 36f * unit - exitEased * 90f * unit
 
             withTransform({
                 translate(left = cx, top = cy)
@@ -212,24 +238,26 @@ fun LucentSplash(
                     scaleY = unit * scaleIn * (1f - wobble - blinkSquash),
                     pivot = Offset.Zero
                 )
-                // The paws swing about their own shoulders inside drawCat — a symmetric, two-pawed
-                // "hello" — rather than the whole drawing rocking with the wave.
+                // The arms swing about their own shoulder pivots inside drawCat — a symmetric,
+                // two-pawed "hello" — rather than the whole drawing rocking with the wave.
             }) {
                 drawCat(
                     glass = glassEased,
                     alpha = alpha,
                     waveDeg = waveDeg,
                     eyeOpen = eyeOpen,
+                    fishBob = fishBob,
                     tint = paletteColors.firstOrNull() ?: Color.White
                 )
             }
         }
 
-        // The wordmark arrives with the glass, so the two land together.
+        // The wordmark arrives with the glass, so the two land together. (Sits a little lower than
+        // it used to: the new cat is taller, and the text should clear its toes.)
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(top = 190.dp),
+                .padding(top = 216.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -257,26 +285,45 @@ fun LucentSplash(
     }
 }
 
+// ---- Palette, sampled straight from the reference picture ----
+private val Fur = Color(0xFFFFFDFA)        // marshmallow white, barely warm
+private val Line = Color(0xFF8C7276)       // warm grey-brown crayon outline
+private val EyeColor = Color(0xFF4E3B40)   // dot eyes
+private val BlushPink = Color(0xFFF6B8CE)  // airbrushed pink wash (cheeks, ears, paw tips)
+private val WhiskerPink = Color(0xFFF0A6BE)
+private val MouthPink = Color(0xFFEE8FB0)  // the wavy little mouth
+private val BellyCream = Color(0xFFF7EFC8) // butter-yellow tummy patch
+private val FishFill = Color(0xFFDFF0FC)   // the napping fish
+private val FishLine = Color(0xFF8FB4D8)
+private val FishEye = Color(0xFF4A7BAA)
+
 /**
- * Draws the Lucent cat at the origin, in a space roughly 260 units wide.
+ * Draws the Lucent cat at the origin, in a space roughly 780 units tall.
  *
- * A cream marshmallow kitten with soft ROUNDED ears (never pointed), solid black eyes,
- * pink cheeks, a little ω nose, whiskers, a butter-yellow tummy, a curly tail and two round paws —
- * every part built from plain Canvas primitives (rounded rects, ovals, arcs, lines and a couple of
- * bezier paths), so it carries no image asset, scales to any screen and can be morphed arbitrarily,
- * which is the entire trick in the "become glass" phase.
+ * Faithful to the reference picture: a marshmallow-white kitten whose huge soft head (a rounded
+ * square unioned with two little round ear bumps, so head-plus-ears is ONE continuous outline)
+ * carries a napping blue fish; dot eyes, airbrushed cheeks, a wavy pink mouth, pink whiskers, a
+ * butter tummy and a curled tail below. The paws are the important change from the old cat: they
+ * are big round mitts drawn as full outlined circles overlapping the torso — connected to the body,
+ * exactly like the reference — and they wave by rotating about shoulder pivots buried deep inside
+ * the body, so however far they swing the join never opens. All of it is plain Canvas primitives
+ * (round rects, ovals, arcs, lines and a few bezier paths united with [PathOperation.Union]): no
+ * image asset, scales to any screen, and can be morphed arbitrarily, which is the entire trick in
+ * the "become glass" phase.
  *
  * [glass] cross-fades between the drawn cat (0) and the glass one (1). The silhouette that turns to
- * glass is the body, ears and paws; the surface details (eyes, cheeks, nose, whiskers, tummy, tail,
- * inner ears, beans) fade out as the glass takes over, so the glass reads as the cat's *form* rather
- * than a cat wearing a painted face. [waveDeg] swings each paw about its shoulder, [eyeOpen] drives
- * the blink (1 = wide open, 0 = shut), and [tint] is the live palette colour the glass picks up.
+ * glass is the head (with ears), body, both paws, the fish and the tail; the painted details (eyes,
+ * cheeks, whiskers, mouth, tummy, blush washes, the fish's face) fade out as the glass takes over,
+ * so the glass reads as the cat's *form* rather than a cat wearing a painted face. [waveDeg] swings
+ * each paw about its shoulder, [eyeOpen] drives the blink (1 = wide open, 0 = shut), [fishBob]
+ * nudges the fish up and down on the crown, and [tint] is the live palette colour the glass picks up.
  */
 private fun DrawScope.drawCat(
     glass: Float,
     alpha: Float,
     waveDeg: Float,
     eyeOpen: Float,
+    fishBob: Float,
     tint: Color
 ) {
     if (alpha <= 0.001f) return
@@ -284,157 +331,215 @@ private fun DrawScope.drawCat(
     val solid = (1f - glass) * alpha    // fur, outline and every painted detail fade as glass arrives
     val glassy = glass * alpha          // the translucent glass rendition fades in over the top
 
-    // Palette sampled straight from the reference art.
-    val fur = Color(0xFFFFF6E2)     // warm cream body
-    val line = Color(0xFF7A6560)    // soft "drawn" outline
-    val eyeCol = Color(0xFF4A3C3A)  // eyes
-    val inEar = Color(0xFFF0B4C4)   // inner ear
-    val cheek = Color(0xFFF4BCC8)   // blush
-    val belly = Color(0xFFFAEECA)   // butter-yellow tummy
-    val nose = Color(0xFFD69292)    // nose
-    val bean = Color(0xFFF2B6C6)    // paw beans
+    // ---- Silhouette geometry ----
 
-    // A small, soft ear — a low rounded dome with a broad, gently curved top, so there is no point
-    // at all. Kept petite and wide so it reads cute rather than tall or pointed.
-    // Built once per side and reused for both the fill pass and the outline pass.
-    fun earPath(side: Float): Path = Path().apply {
-        moveTo(side * 66f, -54f)                                       // outer base
-        cubicTo(side * 71f, -78f, side * 63f, -89f, side * 51f, -90f)   // up the outer wall
-        cubicTo(side * 44f, -91f, side * 37f, -91f, side * 30f, -90f)   // across a wide, rounded top
-        cubicTo(side * 23f, -89f, side * 20f, -78f, side * 24f, -54f)   // down the inner wall
-        close()
+    // Head: one continuous outline = big rounded square ∪ two round ear bumps ∪ two cheek
+    // bulges. The union keeps the crayon line unbroken everywhere, and the cheeks make the head
+    // widest at its lower half — measured straight off the reference, where the face melts into
+    // the shoulders with barely a pinch.
+    val head = Path().apply {
+        addRoundRect(RoundRect(Rect(-130f, -152f, 130f, 28f), CornerRadius(82f, 82f)))
     }
-    val earL = earPath(-1f)
-    val earR = earPath(1f)
+        .union(circlePath(-90f, -138f, 36f)).union(circlePath(90f, -138f, 36f))
+        .union(circlePath(-98f, -4f, 45f)).union(circlePath(98f, -4f, 45f))
 
-    // ---- Ears (drawn first; the body is drawn over their base for a clean, seamless join) ----
-    for (i in 0..1) {
-        val ear = if (i == 0) earL else earR
-        if (solid > 0.002f) drawPath(ear, fur.copy(alpha = solid))
-        if (glassy > 0.002f) {
-            drawPath(ear, Color.White.copy(alpha = glassy * 0.16f))
-            drawPath(ear, tint.copy(alpha = glassy * 0.20f))
-        }
-    }
-    for (i in 0..1) {
-        val side = if (i == 0) -1f else 1f
-        val ear = if (i == 0) earL else earR
-        if (solid > 0.002f) {
-            drawOval(inEar.copy(alpha = solid), Offset(side * 45f - 11f, -83f), Size(22f, 24f))
-            drawPath(ear, line.copy(alpha = solid), style = Stroke(width = 3f))
-        }
-        if (glassy > 0.002f) drawPath(ear, Color.White.copy(alpha = glassy * 0.7f), style = Stroke(width = 2.6f))
+    // Body: a wide rounded slab — almost as wide as the head (0.87 of it, like the reference) —
+    // whose top rises behind the cheeks so there is no neck pinch between face and shoulders.
+    val body = Path().apply {
+        addRoundRect(RoundRect(Rect(-120f, 0f, 120f, 210f), CornerRadius(68f, 68f)))
     }
 
-    // ---- Tail: a curly bezier tucked behind the body ----
-    val tail = Path().apply {
-        moveTo(86f, 64f)
-        cubicTo(158f, 66f, 150f, 6f, 112f, 20f)
-    }
-    if (solid > 0.002f) drawPath(tail, line.copy(alpha = solid), style = Stroke(width = 9f, cap = StrokeCap.Round))
-    if (glassy > 0.002f) drawPath(tail, Color.White.copy(alpha = glassy * 0.6f), style = Stroke(width = 8f, cap = StrokeCap.Round))
-
-    // ---- Body: a marshmallow rounded square, the mass everything else sits on ----
-    val bodyTL = Offset(-94f, -65f)         // centre (0, 24), size 188 x 178
-    val bodySize = Size(188f, 178f)
-    val bodyR = CornerRadius(64f, 64f)
-    if (solid > 0.002f) {
-        drawRoundRect(fur.copy(alpha = solid), bodyTL, bodySize, bodyR)
-        drawRoundRect(line.copy(alpha = solid), bodyTL, bodySize, bodyR, style = Stroke(width = 3.2f))
-    }
-    if (glassy > 0.002f) {
-        drawRoundRect(Color.White.copy(alpha = glassy * 0.16f), bodyTL, bodySize, bodyR)
-        drawRoundRect(tint.copy(alpha = glassy * 0.20f), bodyTL, bodySize, bodyR)
-        drawRoundRect(Color.White.copy(alpha = glassy * 0.75f), bodyTL, bodySize, bodyR, style = Stroke(width = 2.8f))
-        // A soft top sheen so the glass body catches the light.
-        drawRoundRect(
-            brush = Brush.verticalGradient(
-                0f to Color.White.copy(alpha = glassy * 0.28f),
-                0.6f to Color.Transparent
-            ),
-            topLeft = bodyTL,
-            size = bodySize,
-            cornerRadius = bodyR
+    // Paws: little round mitts held IN FRONT of the torso, their outer edges flush with the
+    // body's — the reference cat keeps its paws tucked against its chest, not hanging off its
+    // sides, and the paw-to-body width ratio (0.35) is measured straight off the picture. Waving
+    // rotates each centre about a shoulder pivot buried inside the body: the arm lifts as one
+    // piece, and at any angle of the swing the paw still overlaps the torso, so the join never
+    // opens. Left paw gets +waveDeg and right paw -waveDeg — a symmetric two-pawed hello.
+    val pawRadius = 42f
+    fun pawCenter(side: Float): Offset {
+        val pivot = Offset(side * 50f, 50f)             // the shoulder, well inside the silhouette
+        val rest = Offset(side * 78f, 82f)              // where the paw rests against the chest
+        val rad = (waveDeg * -side) * (PI.toFloat() / 180f)
+        val dx = rest.x - pivot.x
+        val dy = rest.y - pivot.y
+        return Offset(
+            pivot.x + dx * cos(rad) - dy * sin(rad),
+            pivot.y + dx * sin(rad) + dy * cos(rad)
         )
     }
+    val pawL = pawCenter(-1f)
+    val pawR = pawCenter(1f)
 
-    // ---- Tummy patch + two little feet (painted detail; fades under the glass) ----
-    if (solid > 0.002f) {
-        drawOval(belly.copy(alpha = solid), Offset(-47f, 55f), Size(94f, 50f))
-        drawArc(line.copy(alpha = solid), 205f, 130f, false, Offset(-51f, 79f), Size(48f, 42f), style = Stroke(width = 4f, cap = StrokeCap.Round))
-        drawArc(line.copy(alpha = solid), 205f, 130f, false, Offset(3f, 79f), Size(48f, 42f), style = Stroke(width = 4f, cap = StrokeCap.Round))
+    // The fish napping on the crown: a plump, nearly round body ∪ two round tail petals, nose to
+    // the right. It sits proudly ABOVE the ears — in the reference the fish owns the very top of
+    // the silhouette — while its belly still rests on the head. fy carries the idle bob.
+    val fy = -180f + fishBob
+    val fish = Path().apply {
+        addOval(Rect(-40f, fy - 38f, 52f, fy + 38f))
+    }.union(fishPetal(fy, -1f)).union(fishPetal(fy, 1f))
+
+    // The curled tail poking out bottom-left, drawn as strokes (outline pass + fill pass) so it
+    // reads as a little tube.
+    val tail = Path().apply {
+        moveTo(-110f, 180f)
+        cubicTo(-128f, 192f, -142f, 192f, -149f, 182f)
+        cubicTo(-155f, 173f, -153f, 160f, -146f, 154f)
     }
 
-    // ---- Cheeks + whiskers ----
+    // ---- SOLID pass: the drawn cat ----
     if (solid > 0.002f) {
-        drawOval(cheek.copy(alpha = solid), Offset(-83f, 22.5f), Size(42f, 27f))
-        drawOval(cheek.copy(alpha = solid), Offset(41f, 22.5f), Size(42f, 27f))
+        // Tail first, tucked behind the body.
+        drawPath(tail, Line.copy(alpha = solid), style = Stroke(width = 19f, cap = StrokeCap.Round))
+        drawPath(tail, Fur.copy(alpha = solid), style = Stroke(width = 11f, cap = StrokeCap.Round))
+
+        // Body, with a soft pink wash along its bottom edge.
+        drawPath(body, Fur.copy(alpha = solid))
+        drawPath(body, Line.copy(alpha = solid), style = Stroke(width = 7f))
+        blush(Offset(0f, 200f), 70f, 0.43f * solid)
+
+        // Butter tummy patch.
+        val bellyRect = Rect(-44f, 86f, 44f, 146f)
+        val bellyPath = Path().apply { addRoundRect(RoundRect(bellyRect, CornerRadius(26f, 26f))) }
+        drawPath(bellyPath, BellyCream.copy(alpha = solid))
+        drawPath(bellyPath, Line.copy(alpha = solid), style = Stroke(width = 4f))
+
+        // Paws over the body: full outlined circles, exactly like the reference, each with a pink
+        // wash on its lower outer edge. Being drawn after the body, the paw hides the stretch of
+        // body outline it overlaps — which is precisely how the reference reads.
         for (i in 0..1) {
             val side = if (i == 0) -1f else 1f
-            val b = side * 82f
-            drawLine(line.copy(alpha = solid), Offset(b, 24f), Offset(b + side * 30f, 18f), 2.2f, StrokeCap.Round)
-            drawLine(line.copy(alpha = solid), Offset(b, 32f), Offset(b + side * 34f, 32f), 2.2f, StrokeCap.Round)
-            drawLine(line.copy(alpha = solid), Offset(b, 40f), Offset(b + side * 30f, 46f), 2.2f, StrokeCap.Round)
+            val c = if (i == 0) pawL else pawR
+            drawCircle(Fur.copy(alpha = solid), pawRadius, c)
+            drawCircle(Line.copy(alpha = solid), pawRadius, c, style = Stroke(width = 7f))
+            blush(Offset(c.x + side * 4f, c.y + 16f), 34f, 0.53f * solid)
         }
-    }
 
-    // ---- Eyes: solid black ovals, collapsing to happy arcs during the blink ----
-    if (solid > 0.002f) {
+        // Head over the paws' tops, then its airbrushed pinks: ear tips, big cheeks, side glow.
+        drawPath(head, Fur.copy(alpha = solid))
+        drawPath(head, Line.copy(alpha = solid), style = Stroke(width = 7f))
         for (i in 0..1) {
             val side = if (i == 0) -1f else 1f
-            val ex = side * 33f
+            blush(Offset(side * 90f, -140f), 34f, 0.49f * solid)
+            blush(Offset(side * 100f, -6f), 54f, 0.65f * solid)
+            blush(Offset(side * 126f, -64f), 38f, 0.33f * solid)
+        }
+
+        // The fish, napping. Face details: a dot eye near the nose, a little gill arc, a ring spot.
+        drawPath(fish, FishFill.copy(alpha = solid))
+        drawPath(fish, FishLine.copy(alpha = solid), style = Stroke(width = 5f))
+        drawCircle(FishEye.copy(alpha = solid), 5f, Offset(32f, fy - 7f))
+        drawArc(
+            FishLine.copy(alpha = solid), -55f, 110f, false,
+            Offset(4f, fy - 13f), Size(20f, 26f), style = Stroke(width = 3.2f, cap = StrokeCap.Round)
+        )
+        drawCircle(FishLine.copy(alpha = solid), 5.5f, Offset(-4f, fy + 7f), style = Stroke(width = 2.6f))
+
+        // Whiskers: three pink strokes a side, fanning gently.
+        for (i in 0..1) {
+            val side = if (i == 0) -1f else 1f
+            drawLine(WhiskerPink.copy(alpha = solid), Offset(side * 102f, -34f), Offset(side * 138f, -42f), 5.5f, StrokeCap.Round)
+            drawLine(WhiskerPink.copy(alpha = solid), Offset(side * 102f, -20f), Offset(side * 138f, -20f), 5.5f, StrokeCap.Round)
+            drawLine(WhiskerPink.copy(alpha = solid), Offset(side * 102f, -6f), Offset(side * 138f, 0f), 5.5f, StrokeCap.Round)
+        }
+
+        // Eyes: solid dots, squashing into happy arcs during the blink.
+        for (i in 0..1) {
+            val side = if (i == 0) -1f else 1f
+            val ex = side * 48f
             if (eyeOpen > 0.22f) {
-                val eh = 26f * eyeOpen
-                // Solid black eyes, exactly like the reference — smaller, no catch-light highlight.
-                drawOval(eyeCol.copy(alpha = solid), Offset(ex - 10.5f, 4f - eh / 2f), Size(21f, eh))
+                val eh = 9.5f * eyeOpen
+                drawOval(EyeColor.copy(alpha = solid), Offset(ex - 9.5f, -34f - eh), Size(19f, eh * 2f))
             } else {
-                // Shut: a happy downward arc.
-                drawArc(line.copy(alpha = solid), 205f, 130f, false, Offset(ex - 10f, -1.5f), Size(20f, 12f), style = Stroke(width = 3f, cap = StrokeCap.Round))
-            }
-        }
-    }
-
-    // ---- Nose + ω mouth ----
-    if (solid > 0.002f) {
-        drawOval(nose.copy(alpha = solid), Offset(-6.5f, 15.5f), Size(13f, 9f))
-        drawArc(line.copy(alpha = solid), 300f, 140f, false, Offset(-14.5f, 18.5f), Size(15f, 13f), style = Stroke(width = 2.6f, cap = StrokeCap.Round))
-        drawArc(line.copy(alpha = solid), 100f, 140f, false, Offset(-0.5f, 18.5f), Size(15f, 13f), style = Stroke(width = 2.6f, cap = StrokeCap.Round))
-    }
-
-    // ---- Two round paws that wave about their shoulders (this is movement 2, "hello") ----
-    for (i in 0..1) {
-        val side = if (i == 0) -1f else 1f
-        val dir = if (i == 0) 1f else -1f         // mirror the swing so the two read as symmetric
-        val pivot = Offset(side * 90f, 34f)        // the shoulder: where the paw meets the body
-        withTransform({ rotate(degrees = waveDeg * dir, pivot = pivot) }) {
-            val pcx = pivot.x + side * 14f
-            val pcy = pivot.y - 8f
-            val pTL = Offset(pcx - 20f, pcy - 20f)
-            val pSize = Size(40f, 40f)
-            if (solid > 0.002f) {
-                drawOval(fur.copy(alpha = solid), pTL, pSize)
-                drawOval(line.copy(alpha = solid), pTL, pSize, style = Stroke(width = 3f))
-                // Three little beans.
-                drawOval(bean.copy(alpha = solid), Offset(pcx - 4f, pcy - 11.5f), Size(8f, 7f))
-                drawOval(bean.copy(alpha = solid), Offset(pcx - 9.5f, pcy - 4.5f), Size(7f, 7f))
-                drawOval(bean.copy(alpha = solid), Offset(pcx + 2.5f, pcy - 4.5f), Size(7f, 7f))
-            }
-            if (glassy > 0.002f) {
-                drawOval(Color.White.copy(alpha = glassy * 0.16f), pTL, pSize)
-                drawOval(tint.copy(alpha = glassy * 0.20f), pTL, pSize)
-                drawOval(Color.White.copy(alpha = glassy * 0.75f), pTL, pSize, style = Stroke(width = 2.6f))
-                drawOval(
-                    brush = Brush.verticalGradient(
-                        0f to Color.White.copy(alpha = glassy * 0.26f),
-                        0.7f to Color.Transparent
-                    ),
-                    topLeft = pTL,
-                    size = pSize
+                // Shut: a happy upward arch.
+                drawArc(
+                    EyeColor.copy(alpha = solid), 205f, 130f, false,
+                    Offset(ex - 10f, -39f), Size(20f, 14f), style = Stroke(width = 4f, cap = StrokeCap.Round)
                 )
             }
         }
+
+        // The wavy mouth: two little downward arcs meeting in an upward point — a soft "w".
+        drawArc(
+            MouthPink.copy(alpha = solid), 10f, 160f, false,
+            Offset(-18f, -26f), Size(20f, 16f), style = Stroke(width = 6.5f, cap = StrokeCap.Round)
+        )
+        drawArc(
+            MouthPink.copy(alpha = solid), 10f, 160f, false,
+            Offset(-2f, -26f), Size(20f, 16f), style = Stroke(width = 6.5f, cap = StrokeCap.Round)
+        )
+    }
+
+    // ---- GLASS pass: the silhouette turned to liquid glass ----
+    // Same recipe as the app's own material: a faint white pane + a wash of the live palette tint,
+    // a bright rim, and a soft top sheen on the two big panes. The fish and tail come along too —
+    // they are part of the form, and the form is what turns to glass.
+    if (glassy > 0.002f) {
+        drawPath(tail, Color.White.copy(alpha = glassy * 0.55f), style = Stroke(width = 9f, cap = StrokeCap.Round))
+
+        val panes = listOf(body, head, fish)
+        for (pane in panes) {
+            drawPath(pane, Color.White.copy(alpha = glassy * 0.16f))
+            drawPath(pane, tint.copy(alpha = glassy * 0.20f))
+            drawPath(pane, Color.White.copy(alpha = glassy * 0.75f), style = Stroke(width = 3f))
+        }
+        for (c in listOf(pawL, pawR)) {
+            drawCircle(Color.White.copy(alpha = glassy * 0.16f), pawRadius, c)
+            drawCircle(tint.copy(alpha = glassy * 0.20f), pawRadius, c)
+            drawCircle(Color.White.copy(alpha = glassy * 0.75f), pawRadius, c, style = Stroke(width = 3f))
+        }
+
+        // Top sheen so the big panes catch the light.
+        drawPath(
+            path = head,
+            brush = Brush.verticalGradient(
+                0f to Color.White.copy(alpha = glassy * 0.28f),
+                1f to Color.Transparent,
+                startY = -152f,
+                endY = -20f
+            )
+        )
+        drawPath(
+            path = body,
+            brush = Brush.verticalGradient(
+                0f to Color.White.copy(alpha = glassy * 0.28f),
+                1f to Color.Transparent,
+                startY = 0f,
+                endY = 110f
+            )
+        )
     }
 }
+
+/** A soft airbrushed pink wash — the reference's blush is sprayed, not painted, so it has no edge. */
+private fun DrawScope.blush(center: Offset, radius: Float, alpha: Float) {
+    if (alpha <= 0.004f) return
+    drawCircle(
+        brush = Brush.radialGradient(
+            0f to BlushPink.copy(alpha = alpha),
+            0.55f to BlushPink.copy(alpha = alpha * 0.5f),
+            1f to Color.Transparent,
+            center = center,
+            radius = radius
+        ),
+        radius = radius,
+        center = center
+    )
+}
+
+/** One round petal of the fish's forked tail; [sg] = -1 for the upper petal, +1 for the lower. */
+private fun fishPetal(fy: Float, sg: Float): Path = Path().apply {
+    moveTo(-32f, fy + sg * 10f)
+    cubicTo(-46f, fy + sg * 20f, -58f, fy + sg * 28f, -68f, fy + sg * 24f)
+    cubicTo(-74f, fy + sg * 20f, -74f, fy + sg * 14f, -66f, fy + sg * 7f)
+    cubicTo(-59f, fy + sg * 2f, -50f, fy, -32f, fy)
+    close()
+}
+
+private fun circlePath(cx: Float, cy: Float, r: Float): Path =
+    Path().apply { addOval(Rect(cx - r, cy - r, cx + r, cy + r)) }
+
+/** Silhouettes are built by uniting simple shapes, which is what keeps their outlines continuous. */
+private fun Path.union(other: Path): Path = Path.combine(PathOperation.Union, this, other)
 
 // ---- Timings, in milliseconds ----
 // One place to retune the whole sequence; every phase above is expressed against these rather than
@@ -451,4 +556,6 @@ private const val MORPH_START_MS = 3300f * SPEED
 private const val MORPH_END_MS = 6600f * SPEED
 private const val EXIT_START_MS = 6600f * SPEED
 private const val WAVE_CYCLES = 3.5f              // a count of paw swings, not a duration — left unscaled
-private const val WAVE_AMP_DEG = 17f              // a slight up/down swing at the shoulder
+private const val WAVE_AMP_DEG = 11f              // gentle: the paws are big, body-attached mitts now
+private const val FISH_BOB_MS = 260f              // period divisor of the fish's tiny idle bob
+private const val FISH_BOB_AMP = 2.2f             // …and its amplitude, in design units
