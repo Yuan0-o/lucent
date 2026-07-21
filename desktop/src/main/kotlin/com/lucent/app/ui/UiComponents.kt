@@ -246,20 +246,14 @@ fun GlassButton(
 }
 
 /**
- * The attachment block shared by the note and task composers (task 13).
+ * The attachment block shared by the note and task composers.
  *
- * ### What was cramped about it
- *
- * Both composers ended the form with a bare `Attach file` row wedged between the priority chips and
- * the big Add button, with no heading, no separation, and — when files were attached — a stack of
- * chips landing directly against the row above. Three unrelated things (choose a priority, attach a
- * file, save) sat at the same visual level with 8dp between them, so the eye had nothing to group
- * on and the one optional step in the form read as an afterthought glued to the primary action.
- *
- * The fix is not more padding, it is structure: a labelled section with a quiet one-line hint, the
- * picker as a real glass button rather than a text row, and the attached files listed underneath it
- * with room to breathe. It occupies slightly more height and is markedly easier to parse, which is
- * the correct trade in a form the user is already scrolling.
+ * Restyled to match the "Set a due date" row one visual level up: a single icon + label line, the
+ * whole row tappable to open the file picker, with any already-attached files listed as removable
+ * chips directly beneath it. The previous labelled mini-section (an "Attachments" heading, an
+ * "Images, PDFs, audio…" hint line and a pill-shaped "Attach file" button) read as a foreign
+ * control next to the plain due-date and pin rows, so all three of those pieces are gone — the
+ * row itself is now the affordance, exactly like the due-date row in the task composer.
  */
 @Composable
 fun AttachmentSection(
@@ -270,22 +264,23 @@ fun AttachmentSection(
 ) {
     val onGradient = LocalOnGradient.current
     val onGradientMuted = LocalOnGradientMuted.current
-    Column(modifier = modifier.fillMaxWidth().padding(top = 4.dp)) {
-        Text(com.lucent.app.i18n.S.attachmentsSectionTitle, color = onGradient, fontSize = 14.sp)
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(com.lucent.app.i18n.S.attachmentsSectionHint, color = onGradientMuted, fontSize = 12.sp)
-        Spacer(modifier = Modifier.height(10.dp))
-        GlassButton(
-            text = com.lucent.app.i18n.S.attachFile,
-            icon = Icons.Default.AttachFile,
-            // Deliberately compact: this optional step is the smaller, secondary action, sized down
-            // so the primary Add button below clearly outweighs it (they used to read the wrong way
-            // round, with the attachment picker larger than the primary action).
-            compact = true,
-            onClick = onPick
-        )
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Same anatomy as the due-date row: muted leading icon, 14sp label, whole row clickable.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp).clickable { onPick() },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.AttachFile, contentDescription = null, tint = onGradientMuted)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = com.lucent.app.i18n.S.attachFile,
+                color = onGradient,
+                fontSize = 14.sp,
+                modifier = Modifier.weight(1f)
+            )
+        }
         if (attachments.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(4.dp))
+            // The chips carry their own top padding, so no extra spacer is needed here.
             PendingAttachmentChips(attachments, onGradientMuted, onRemove)
         }
     }
