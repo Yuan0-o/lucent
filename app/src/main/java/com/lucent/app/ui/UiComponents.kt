@@ -11,6 +11,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowDown
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowUp
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
@@ -705,6 +708,55 @@ fun BrokenLinkChips(
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * A vertical pair of round "jump to top / jump to bottom" buttons for a long scrolling list, meant
+ * to be overlaid at the bottom-right of the notes or tasks list. Each button appears only when there
+ * is somewhere to scroll that way, so at the very top only "down" shows and at the very bottom only
+ * "up". Same frosted disc styling as the assistant's jump-to-latest control (task E2).
+ */
+@Composable
+fun ScrollEdgeJumpButtons(
+    canUp: Boolean,
+    canDown: Boolean,
+    tint: Color,
+    onUp: () -> Unit,
+    onDown: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        AnimatedVisibility(visible = canUp, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.15f))
+                    .border(1.dp, Color.White.copy(alpha = 0.30f), CircleShape)
+                    .clickable(onClick = onUp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.KeyboardDoubleArrowUp, contentDescription = com.lucent.app.i18n.S.a11yScrollToTop, tint = tint)
+            }
+        }
+        AnimatedVisibility(visible = canDown, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.15f))
+                    .border(1.dp, Color.White.copy(alpha = 0.30f), CircleShape)
+                    .clickable(onClick = onDown),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.KeyboardDoubleArrowDown, contentDescription = com.lucent.app.i18n.S.a11yScrollToBottom, tint = tint)
             }
         }
     }
