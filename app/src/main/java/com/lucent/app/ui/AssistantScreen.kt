@@ -904,7 +904,14 @@ fun AssistantScreen(active: Boolean = true) {
                         Box(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.align(Alignment.CenterStart).frostedGlass().padding(12.dp)) {
                                 Text(
-                                    com.lucent.app.i18n.S.assistantGreeting(assistantName),
+                                    // Allow CJK punctuation to START a line (see
+                                    // withLineStartPunctuationAllowed at the bottom of this
+                                    // file). Without it, the fullwidth comma after 规划问题 must
+                                    // not open a line, so the greedy breaker drags 题 down to
+                                    // the next line with it — leaving a one-character hole that
+                                    // reads as a stray space between 问 and 题.
+                                    com.lucent.app.i18n.S.assistantGreeting(assistantName)
+                                        .withLineStartPunctuationAllowed(),
                                     color = onGradient
                                 )
                             }
@@ -984,18 +991,22 @@ fun AssistantScreen(active: Boolean = true) {
 
                             // Long-press the message text to copy it to the clipboard. When this is
                             // the message a search jumped to, the matched run is shaded amber (task 9).
+                            // Each slice goes through withLineStartPunctuationAllowed on its own,
+                            // so the highlight offsets — which refer to the raw content — still
+                            // land on the right run, and long-press copy keeps using the raw
+                            // msg.content (the transform is display-only and never leaves Text).
                             val contentText = if (isHighlighted && highlightLen > 0) {
                                 buildAnnotatedString {
                                     val s = highlightStart.coerceIn(0, msg.content.length)
                                     val e = (highlightStart + highlightLen).coerceIn(s, msg.content.length)
-                                    append(msg.content.substring(0, s))
+                                    append(msg.content.substring(0, s).withLineStartPunctuationAllowed())
                                     withStyle(SpanStyle(background = Color(0x66FFC107), fontWeight = FontWeight.Bold)) {
-                                        append(msg.content.substring(s, e))
+                                        append(msg.content.substring(s, e).withLineStartPunctuationAllowed())
                                     }
-                                    append(msg.content.substring(e))
+                                    append(msg.content.substring(e).withLineStartPunctuationAllowed())
                                 }
                             } else {
-                                buildAnnotatedString { append(msg.content) }
+                                buildAnnotatedString { append(msg.content.withLineStartPunctuationAllowed()) }
                             }
                             Text(
                                 contentText,
@@ -1035,7 +1046,7 @@ fun AssistantScreen(active: Boolean = true) {
                                     fontSize = 11.sp,
                                     modifier = Modifier.padding(bottom = 3.dp)
                                 )
-                                Text(streamingText, color = onGradient)
+                                Text(streamingText.withLineStartPunctuationAllowed(), color = onGradient)
                             }
                         }
                     }
@@ -1366,3 +1377,49 @@ private fun sanitizeExportName(name: String): String =
  */
 private fun convDisplayTitle(title: String): String =
     if (title == "New conversation") com.lucent.app.i18n.S.newConversation else title
+
+// U+200B ZERO WIDTH SPACE. Unicode line breaking (UAX #14, rule LB8) ALWAYS permits a break
+// right after this character — overriding the kinsoku prohibition that normally keeps CJK
+// closing punctuation off the start of a line.
+private const val ZWSP = '\u200B'
+
+// CJK punctuation that the default line breaker refuses to place at the start of a line. When a
+// line fills up right before one of these, the breaker drags the preceding character down to the
+// next line along with the mark, leaving a one-character hole at the end of the line that reads
+// as a stray space inside a word ("规划问 / 题，" instead of "规划问题 / ，").
+private const val CLINGY_CJK_PUNCT = "，。、；：！？）】》〉」』〕〗〙〛％…‥"
+
+// True for characters whose presence marks CJK text: Han ideographs, kana, Hangul, and the CJK /
+// fullwidth punctuation blocks. Used as the left-hand context test so the transform never touches
+// Western punctuation in Latin text (e.g. the comma in "e.g., this").
+private fun isCjkContext(ch: Char): Boolean {
+    val c = ch.code
+    return (c in 0x4E00..0x9FFF) ||   // CJK Unified Ideographs
+        (c in 0x3400..0x4DBF) ||      // CJK Unified Ideographs Extension A
+        (c in 0x3040..0x30FF) ||      // Hiragana and Katakana
+        (c in 0x3000..0x303F) ||      // CJK symbols and punctuation (」。、 …)
+        (c in 0xFF00..0xFFEF) ||      // Fullwidth and halfwidth forms (，！？） …)
+        (c in 0xAC00..0xD7AF) ||      // Hangul syllables
+        (c in 0xF900..0xFAFF)         // CJK Compatibility Ideographs
+}
+
+/**
+ * Returns a copy of the string in which CJK punctuation is allowed to START a line: a zero-width
+ * space goes in front of every clingy mark that follows a CJK character, creating a break
+ * opportunity that every Unicode-compliant text engine must honour (UAX #14 rule LB8). The same
+ * logic therefore behaves identically on Android and on desktop, on every OS version. A full line
+ * can now end with "…规划问题" and the comma simply opens the next line, instead of pulling 题
+ * down with it and leaving a hole that reads as a stray space. Display-time only: never persist,
+ * copy or send the transformed string.
+ */
+private fun String.withLineStartPunctuationAllowed(): String {
+    if (isEmpty()) return this
+    val sb = StringBuilder(length + 8)
+    var prev = '\u0000'
+    for (ch in this) {
+        if (ch in CLINGY_CJK_PUNCT && isCjkContext(prev)) sb.append(ZWSP)
+        sb.append(ch)
+        prev = ch
+    }
+    return sb.toString()
+}

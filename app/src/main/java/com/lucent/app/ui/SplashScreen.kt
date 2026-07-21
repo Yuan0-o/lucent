@@ -40,7 +40,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.sin
 
 /**
@@ -79,10 +78,12 @@ object AppReady {
  * Redrawn from a reference picture: a marshmallow-white kitten with a huge soft head, two little
  * round ear bumps, dot eyes, airbrushed pink cheeks, a wavy pink mouth, pink whiskers, a
  * butter-yellow tummy, a curled tail — and a plump blue fish napping on its head, which bobs
- * gently while the cat is solid. Its paws are NOT floating circles: they are little round mitts
- * held in front of a wide torso, outer edges flush with the body, overlapping it exactly as in the
- * reference — so cat-plus-paws reads as one connected plush shape. All the key proportions (body
- * 0.87 of head width, paw 0.35 of body width, cheeks the widest point) are measured off the picture.
+ * gently while the cat is solid. Its paws are NOT floating circles: they are slim vertical mitts —
+ * rounded "stick" cross-sections, taller than they are wide — held in front of a wide torso and
+ * overlapping it, so cat-plus-paws reads as one connected plush shape. The key proportions (body
+ * 0.87 of head width, cheeks the widest point) are measured off the picture; the mitts are
+ * deliberately slimmer than the reference's round paws (~0.24 of the body width) to open up the
+ * chest and let the tummy patch show.
  *
  * ### The animation
  *
@@ -195,8 +196,8 @@ fun LucentSplash(
         val scaleIn = 0.62f + 0.38f * enterEased + overshoot
 
         // Wave: both arms lift and swing about their shoulder pivots, tapering off as the blink
-        // approaches. The amplitude is gentler than it used to be — the paws are big, body-attached
-        // mitts now, and a small swing of a big arm already reads as an enthusiastic hello.
+        // approaches. The amplitude is gentle — the paws are long, body-attached mitts, and a
+        // small swing of a long arm already reads as an enthusiastic hello.
         val waveT = ((t - ENTER_MS) / (WAVE_END_MS - ENTER_MS)).coerceIn(0f, 1f)
         val waveDeg = sin(waveT * WAVE_CYCLES * 2f * PI.toFloat()) * WAVE_AMP_DEG * (1f - waveT * 0.3f)
 
@@ -237,8 +238,8 @@ fun LucentSplash(
                     scaleY = unit * scaleIn * (1f - wobble - blinkSquash),
                     pivot = Offset.Zero
                 )
-                // The arms swing about their own shoulder pivots inside drawCat — a symmetric,
-                // two-pawed "hello" — rather than the whole drawing rocking with the wave.
+                // The mitts swing about their own planted bottom caps inside drawCat — a
+                // symmetric, two-pawed "hello" — rather than the whole drawing rocking.
             }) {
                 drawCat(
                     glass = glassEased,
@@ -251,12 +252,14 @@ fun LucentSplash(
             }
         }
 
-        // The wordmark arrives with the glass, so the two land together. (Sits a little lower than
-        // it used to: the new cat is taller, and the text should clear its toes.)
+        // The wordmark arrives with the glass, so the two land together. It sits well below the
+        // figure: the cat's body reaches ~210 design units under its own centre (plus the soft
+        // blush at its base), and the old offset let the lower body sit right on the text — so the
+        // name now clears the whole silhouette with a little air to spare.
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(top = 216.dp),
+                .padding(top = 300.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -303,10 +306,11 @@ private val FishEye = Color(0xFF4A7BAA)
  * Faithful to the reference picture: a marshmallow-white kitten whose huge soft head (a rounded
  * square unioned with two little round ear bumps, so head-plus-ears is ONE continuous outline)
  * carries a napping blue fish; dot eyes, airbrushed cheeks, a wavy pink mouth, pink whiskers, a
- * butter tummy and a curled tail below. The paws are the important change from the old cat: they
- * are big round mitts drawn as full outlined circles overlapping the torso — connected to the body,
- * exactly like the reference — and they wave by rotating about shoulder pivots buried deep inside
- * the body, so however far they swing the join never opens. All of it is plain Canvas primitives
+ * butter tummy and a curled tail below. The paws are slim vertical mitts — outlined rounded
+ * rectangles with fully rounded end caps, like little stick cross-sections — overlapping the torso
+ * and connected to the body; they wave by rotating about shoulder pivots buried deep inside the
+ * body, each mitt tilting with its arm, so however far they swing the join never opens. All of it
+ * is plain Canvas primitives
  * (round rects, ovals, arcs, lines and a few bezier paths united with [PathOperation.Union]): no
  * image asset, scales to any screen, and can be morphed arbitrarily, which is the entire trick in
  * the "become glass" phase.
@@ -315,7 +319,7 @@ private val FishEye = Color(0xFF4A7BAA)
  * glass is the head (with ears), body, both paws, the fish and the tail; the painted details (eyes,
  * cheeks, whiskers, mouth, tummy, blush washes, the fish's face) fade out as the glass takes over,
  * so the glass reads as the cat's *form* rather than a cat wearing a painted face. [waveDeg] swings
- * each paw about its shoulder, [eyeOpen] drives the blink (1 = wide open, 0 = shut), [fishBob]
+ * each paw about its planted bottom cap, [eyeOpen] drives the blink (1 = wide open, 0 = shut), [fishBob]
  * nudges the fish up and down on the crown, and [tint] is the live palette colour the glass picks up.
  */
 private fun DrawScope.drawCat(
@@ -349,26 +353,24 @@ private fun DrawScope.drawCat(
         addRoundRect(RoundRect(Rect(-120f, 0f, 120f, 210f), CornerRadius(68f, 68f)))
     }
 
-    // Paws: little round mitts held IN FRONT of the torso, their outer edges flush with the
-    // body's — the reference cat keeps its paws tucked against its chest, not hanging off its
-    // sides, and the paw-to-body width ratio (0.35) is measured straight off the picture. Waving
-    // rotates each centre about a shoulder pivot buried inside the body: the arm lifts as one
-    // piece, and at any angle of the swing the paw still overlaps the torso, so the join never
-    // opens. Left paw gets +waveDeg and right paw -waveDeg — a symmetric two-pawed hello.
-    val pawRadius = 42f
-    fun pawCenter(side: Float): Offset {
-        val pivot = Offset(side * 50f, 50f)             // the shoulder, well inside the silhouette
-        val rest = Offset(side * 78f, 82f)              // where the paw rests against the chest
-        val rad = (waveDeg * -side) * (PI.toFloat() / 180f)
-        val dx = rest.x - pivot.x
-        val dy = rest.y - pivot.y
-        return Offset(
-            pivot.x + dx * cos(rad) - dy * sin(rad),
-            pivot.y + dx * sin(rad) + dy * cos(rad)
-        )
-    }
-    val pawL = pawCenter(-1f)
-    val pawR = pawCenter(1f)
+    // Paws: slim vertical mitts held IN FRONT of the torso — rounded-rectangle "stick" cross
+    // sections, clearly taller than they are wide, with the corner radius equal to the half-width
+    // so both ends are fully rounded caps. Narrower than the old round paws, they reveal more of
+    // the chest (and the whole tummy patch) while still overlapping the torso, so cat-plus-paws
+    // keeps reading as one connected plush shape. The wave is a metronome swing: each mitt's
+    // BOTTOM cap stays planted on the torso while the whole stick rotates left and right about
+    // that fixed bottom point, so the free top cap sweeps side to side like a waving hand and
+    // the join at the base can never open. Left paw gets +waveDeg and right paw -waveDeg — a
+    // mirrored, symmetric two-pawed hello.
+    val pawHalfWidth = 29f
+    val pawHalfHeight = 57f
+    val pawSize = Size(pawHalfWidth * 2f, pawHalfHeight * 2f)
+    val pawCorner = CornerRadius(pawHalfWidth, pawHalfWidth)
+    // Rest centres are fixed — all motion comes from rotating about each mitt's bottom cap. The
+    // rest y sits a touch lower than the old round paw so the taller mitt's top cap still clears
+    // the cheeks and stays visible.
+    val pawL = Offset(-78f, 96f)
+    val pawR = Offset(78f, 96f)
 
     // The fish napping on the crown: a plump, nearly round body ∪ two round tail petals, nose to
     // the right. It sits proudly ABOVE the ears — in the reference the fish owns the very top of
@@ -403,15 +405,21 @@ private fun DrawScope.drawCat(
         drawPath(bellyPath, BellyCream.copy(alpha = solid))
         drawPath(bellyPath, Line.copy(alpha = solid), style = Stroke(width = 4f))
 
-        // Paws over the body: full outlined circles, exactly like the reference, each with a pink
-        // wash on its lower outer edge. Being drawn after the body, the paw hides the stretch of
-        // body outline it overlaps — which is precisely how the reference reads.
+        // Paws over the body: slim outlined vertical mitts, each with a pink wash near its lower
+        // rounded end. Being drawn after the body, the paw hides the stretch of body outline it
+        // overlaps — which is precisely how the reference reads. Each mitt rotates about its own
+        // bottom cap — the fixed contact point on the torso — so it swings like a little
+        // metronome while its base never leaves the body.
         for (i in 0..1) {
             val side = if (i == 0) -1f else 1f
             val c = if (i == 0) pawL else pawR
-            drawCircle(Fur.copy(alpha = solid), pawRadius, c)
-            drawCircle(Line.copy(alpha = solid), pawRadius, c, style = Stroke(width = 7f))
-            blush(Offset(c.x + side * 4f, c.y + 16f), 34f, 0.53f * solid)
+            val bottomPivot = Offset(c.x, c.y + pawHalfHeight)
+            withTransform({ rotate(degrees = waveDeg * -side, pivot = bottomPivot) }) {
+                val topLeft = Offset(c.x - pawHalfWidth, c.y - pawHalfHeight)
+                drawRoundRect(Fur.copy(alpha = solid), topLeft, pawSize, pawCorner)
+                drawRoundRect(Line.copy(alpha = solid), topLeft, pawSize, pawCorner, style = Stroke(width = 7f))
+                blush(Offset(c.x + side * 3f, c.y + 28f), 30f, 0.53f * solid)
+            }
         }
 
         // Head over the paws' tops, then its airbrushed pinks: ear tips, big cheeks, side glow.
@@ -482,10 +490,19 @@ private fun DrawScope.drawCat(
             drawPath(pane, tint.copy(alpha = glassy * 0.20f))
             drawPath(pane, Color.White.copy(alpha = glassy * 0.75f), style = Stroke(width = 3f))
         }
-        for (c in listOf(pawL, pawR)) {
-            drawCircle(Color.White.copy(alpha = glassy * 0.16f), pawRadius, c)
-            drawCircle(tint.copy(alpha = glassy * 0.20f), pawRadius, c)
-            drawCircle(Color.White.copy(alpha = glassy * 0.75f), pawRadius, c, style = Stroke(width = 3f))
+        for (i in 0..1) {
+            val side = if (i == 0) -1f else 1f
+            val c = if (i == 0) pawL else pawR
+            // Same bottom-cap swing as the solid mitts. By the time the glass shows, the wave
+            // has settled to zero, but keeping the transform guarantees the two renditions can
+            // never tear apart if the timing is ever retuned.
+            val bottomPivot = Offset(c.x, c.y + pawHalfHeight)
+            withTransform({ rotate(degrees = waveDeg * -side, pivot = bottomPivot) }) {
+                val topLeft = Offset(c.x - pawHalfWidth, c.y - pawHalfHeight)
+                drawRoundRect(Color.White.copy(alpha = glassy * 0.16f), topLeft, pawSize, pawCorner)
+                drawRoundRect(tint.copy(alpha = glassy * 0.20f), topLeft, pawSize, pawCorner)
+                drawRoundRect(Color.White.copy(alpha = glassy * 0.75f), topLeft, pawSize, pawCorner, style = Stroke(width = 3f))
+            }
         }
 
         // Top sheen so the big panes catch the light.
@@ -556,6 +573,8 @@ private const val MORPH_START_MS = 3300f * SPEED
 private const val MORPH_END_MS = 6600f * SPEED
 private const val EXIT_START_MS = 6600f * SPEED
 private const val WAVE_CYCLES = 3.5f              // a count of paw swings, not a duration — left unscaled
-private const val WAVE_AMP_DEG = 11f              // gentle: the paws are big, body-attached mitts now
+private const val WAVE_AMP_DEG = 14f              // metronome swing about each mitt's planted
+                                                  // bottom cap; ±14° sweeps the free top cap
+                                                  // ~28 design units to either side
 private const val FISH_BOB_MS = 260f              // period divisor of the fish's tiny idle bob
 private const val FISH_BOB_AMP = 2.2f             // …and its amplitude, in design units
