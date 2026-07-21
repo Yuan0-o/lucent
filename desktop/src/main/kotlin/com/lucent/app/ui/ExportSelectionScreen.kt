@@ -115,6 +115,21 @@ fun <T> ExportSelectionScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = com.lucent.app.i18n.S.actionBack, tint = onGradient)
             }
             Text(title, color = onGradient, fontSize = 20.sp, modifier = Modifier.weight(1f))
+            // Export lives up here in the title row (task E1) so the floating bottom bar can never sit
+            // on top of it. Same enabled state and label logic as the old bottom button.
+            Button(
+                onClick = {
+                    val chosen = ordered.filter { id(it) in selectedIds }
+                    val chosenAttachments = chosen.flatMap { item ->
+                        attachmentsOf(item).filter { attKey(id(item), it.name) in selectedAttachmentKeys }
+                    }
+                    if (chosen.isNotEmpty()) onExport(chosen, selectedFormat, chosenAttachments)
+                },
+                enabled = selectedIds.isNotEmpty(),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(if (selectedIds.isEmpty()) com.lucent.app.i18n.S.actionExport else com.lucent.app.i18n.S.exportNSelected(selectedIds.size))
+            }
         }
 
         OutlinedTextField(
@@ -245,21 +260,10 @@ fun <T> ExportSelectionScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-        Button(
-            onClick = {
-                val chosen = ordered.filter { id(it) in selectedIds }
-                // Resolve the ticked attachment keys back to real attachments on the chosen items.
-                val chosenAttachments = chosen.flatMap { item ->
-                    attachmentsOf(item).filter { attKey(id(item), it.name) in selectedAttachmentKeys }
-                }
-                if (chosen.isNotEmpty()) onExport(chosen, selectedFormat, chosenAttachments)
-            },
-            enabled = selectedIds.isNotEmpty(),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (selectedIds.isEmpty()) com.lucent.app.i18n.S.actionExport else com.lucent.app.i18n.S.exportNSelected(selectedIds.size))
-        }
+        // The format picker is now the last element (Export moved up to the title row, task E1), so a
+        // spacer carries the floating-bottom-bar inset to keep it clear of the bar. On desktop that
+        // inset is 0, so this collapses to nothing.
+        Spacer(modifier = Modifier.height(LocalBottomBarInset.current))
     }
 
     // Attachment viewer overlay. Dismissing returns to the selection list with all ticks intact.
