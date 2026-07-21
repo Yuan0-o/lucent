@@ -33,7 +33,6 @@ import com.lucent.app.ui.LocalOnGradient
 import com.lucent.app.ui.LocalOnGradientMuted
 import com.lucent.app.ui.LockScreen
 import com.lucent.app.ui.LucentSplash
-import com.lucent.app.ui.LucentFont
 import com.lucent.app.ui.LucentPalette
 import com.lucent.app.ui.PALETTE_CYCLE
 import com.lucent.app.ui.rememberCyclingPaletteColors
@@ -97,7 +96,7 @@ fun DesktopApp(startup: SettingsRepository.StartupPrefs) {
             ?: LucentPalette.SUNSET.colors
     }
 
-    MaterialTheme(colorScheme = colors, typography = lucentTypography(LucentFont.fromKey(fontKey))) {
+    MaterialTheme(colorScheme = colors, typography = lucentTypography(fontKey)) {
         CompositionLocalProvider(
             LocalOnGradient provides onGradient,
             LocalOnGradientMuted provides onGradientMuted

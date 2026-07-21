@@ -92,7 +92,6 @@ import com.lucent.app.ui.LocalOnGradientMuted
 import com.lucent.app.ui.LockScreen
 import com.lucent.app.ui.LucentSplash
 import com.lucent.app.ui.lucentGlassRim
-import com.lucent.app.ui.LucentFont
 import com.lucent.app.ui.LucentToast
 import com.lucent.app.ui.lucentTypography
 import com.lucent.app.ui.LucentPalette
@@ -307,7 +306,7 @@ class MainActivity : FragmentActivity() {
                     ?: LucentPalette.SUNSET.colors
             }
 
-            MaterialTheme(colorScheme = colors, typography = lucentTypography(LucentFont.fromKey(fontKey))) {
+            MaterialTheme(colorScheme = colors, typography = lucentTypography(fontKey)) {
                 CompositionLocalProvider(
                     LocalOnGradient provides onGradient,
                     LocalOnGradientMuted provides onGradientMuted

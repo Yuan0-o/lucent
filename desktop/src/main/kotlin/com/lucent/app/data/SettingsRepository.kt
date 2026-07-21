@@ -165,6 +165,9 @@ class SettingsRepository(private val context: Context) {
 
     val themeMode: Flow<String> = state.map { str(it, K.THEME_MODE) ?: "system" }
     val palette: Flow<String> = state.map { str(it, K.PALETTE) ?: "CYCLE" }
+    // App-wide font choice: "system" (the platform font, and the out-of-the-box state) or the id
+    // of a font imported through data/FontStore. An id that no longer resolves simply renders as
+    // the system font — see ui/LucentFonts.
     val font: Flow<String> = state.map { str(it, K.FONT) ?: "system" }
 
     data class DisplayPrefs(val themeMode: String, val palette: String, val font: String)

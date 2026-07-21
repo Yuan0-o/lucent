@@ -122,8 +122,11 @@ Web search and cross-conversation memory stay off on device throughout, on purpo
 English, Simplified Chinese, Japanese, and Korean — the entire interface, every dialog, toast, and
 accessibility label, with English as the sensible default and the others a tap away. Switching
 is immediate: no restart, no reload. It studiously never touches your content — your notes, your
-tasks, and the assistant's replies stay in whatever language you wrote them. Each script also
-brings **three typefaces of its own**, labelled in their native names.
+tasks, and the assistant's replies stay in whatever language you wrote them. Type is yours to
+choose too: Lucent ships no fonts of its own and follows your device's font out of the box, and you
+can **import your own font files** (.ttf / .otf / .ttc) in Settings — each under a name you give it,
+previewed in its own face, switchable instantly, carried along in backups, and deletable the moment
+you tire of it.
 
 ## Privacy that is structural, not merely promised
 
@@ -204,13 +207,12 @@ short version, with our gratitude, is this:
 | [SQLCipher](https://www.zetetic.net/sqlcipher/) — © Zetetic LLC | the lock on that database, on Android | BSD-style |
 | [llama.cpp & GGML](https://github.com/ggml-org/llama.cpp) — © Georgi Gerganov & contributors | an entire language model, on your own silicon | MIT |
 | [org.json](https://github.com/stleary/JSON-java) — © JSON.org | reading JSON on the desktop | JSON License |
-| The bundled fonts — Noto Serif SC, JetBrains Mono, and their kin | every letter you read | SIL OFL 1.1 |
 
 A particular word for **SQLCipher**, whose BSD-style licence asks — not unreasonably, given it is
 the thing keeping your diary shut — that its copyright and notice be reproduced somewhere a user can
 actually find them. So they are, in the notices file above; if you ship a build of Lucent, keep them
-findable. The Open Font License extends its bundled fonts the same courtesy: use and adapt them
-freely, but don't sell them on their own, and leave their reserved names to their authors.
+findable. Fonts, incidentally, no longer appear in that table at all: Lucent bundles none, and the
+ones you import stay your own files under whatever terms you hold them.
 
 ## Licence, and the one small thing it asks in return
 

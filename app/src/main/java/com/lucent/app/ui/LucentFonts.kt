@@ -1,90 +1,84 @@
 package com.lucent.app.ui
 
+import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import com.lucent.app.R
+import com.lucent.app.data.FontStore
 
 /**
- * Which writing system a bundled font is designed for. Drives the grouped, language-labelled font
- * picker (see SettingsScreen): every font is shown, sorted under the header for its script, so the
- * user can tell at a glance which language each face is meant for. [SYSTEM] is the platform default.
+ * How a stored font preference becomes a Compose [FontFamily].
+ *
+ * The app ships no fonts (font library task). The preference (SettingsRepository.font) holds
+ * either [SYSTEM_FONT_KEY] — the platform default, and the out-of-the-box state — or the id of a
+ * font the user imported through [FontStore]. This file is the only place that mapping happens:
+ * the settings picker previews rows through [LucentFontResolver], and the app-wide Typography is
+ * built from the same cache through [lucentTypography], so the two can never disagree.
+ *
+ * Resolution is defensive by construction: an unknown id, a deleted file, or bytes the platform
+ * refuses to parse all resolve to null — the system font — never to a crash or to tofu. That is
+ * the same "unknown falls back to system" contract the old bundled-font enum kept, carried over to
+ * a world where the ids are user-made.
  */
-enum class FontScript { SYSTEM, LATIN, CHINESE, JAPANESE, KOREAN }
+const val SYSTEM_FONT_KEY = "system"
 
-/**
- * The app-wide font choice, stored as a short stable key in settings (see SettingsRepository).
- *
- * "System" keeps Compose's platform font. The rest are bundled TTFs under res/font. Each entry
- * knows its stored [key], the [label] shown in the picker, which [script] it belongs to, and how to
- * build its [FontFamily] (null = platform default).
- *
- * The label is the font's OWN native name — written in the script the font is designed for
- * (Chinese, Japanese, Korean, and so on) rather than a romanization —
- * so a reader of that language recognizes it immediately and the picker reads elegantly in any of
- * the four UI languages. The picker draws each label in its own font, so the list also previews it.
- *
- * Kept as a small enum rather than free strings so the settings UI, the persisted value, and the
- * Typography builder can never drift out of sync — an unknown stored key simply falls back to
- * [SYSTEM].
- */
-enum class LucentFont(
-    val key: String,
-    val label: String,
-    val script: FontScript,
-    private val family: FontFamily?
-) {
-    SYSTEM("system", "System", FontScript.SYSTEM, null),
+object LucentFontResolver {
 
-    // ---- Latin / English (three faces) ----
-    JETBRAINS("jetbrains", "JetBrains Mono", FontScript.LATIN, FontFamily(Font(R.font.jetbrainsmono_regular))),
-    GREAT_VIBES("greatvibes", "Great Vibes", FontScript.LATIN, FontFamily(Font(R.font.greatvibes_regular))),
-    CINZEL("cinzel", "Cinzel", FontScript.LATIN, FontFamily(Font(R.font.cinzel_regular))),
+    // getOrPut needs a non-null value even for "load failed", hence the tiny holder. Caching a
+    // failure is correct here: ids are minted once per import and never reused, so a file that
+    // failed to load will not silently become loadable under the same id.
+    private class Holder(val family: FontFamily?)
 
-    // ---- CJK families (localization task) ----
-    //
-    // Added exactly the way the Latin fonts above are: a bundled TTF under res/font, one enum entry,
-    // and nothing else — the picker, persistence, and Typography builder all work off this list.
-    // Three faces per script, so each of Chinese, Japanese, and Korean gets the same choice English
-    // has, and each label is the font's own native name.
-    //
-    // Coverage note: none of these is a pan-CJK face (e.g. the Japanese fonts carry kana + the kanji
-    // set but no Hangul). That is safe: Compose resolves missing glyphs through the platform's
-    // per-glyph fallback chain, so text in another script renders in the system font rather than as
-    // tofu — nothing is ever blocked or shown as □.
-    NOTO_SERIF_SC("notoserifsc", "思源宋体", FontScript.CHINESE, FontFamily(Font(R.font.notoserifsc_regular))),
-    ZCOOL_XIAOWEI("zcoolxiaowei", "站酷小薇", FontScript.CHINESE, FontFamily(Font(R.font.zcoolxiaowei_regular))),
-    ZHI_MANG_XING("zhimangxing", "志莽行书", FontScript.CHINESE, FontFamily(Font(R.font.zhimangxing_regular))),
-    SHIPPORI_MINCHO("shipporimincho", "しっぽり明朝", FontScript.JAPANESE, FontFamily(Font(R.font.shipporimincho_regular))),
-    YUJI_MAI("yujimai", "佑字舞", FontScript.JAPANESE, FontFamily(Font(R.font.yujimai_regular))),
-    REGGAE_ONE("reggaeone", "レゲエ One", FontScript.JAPANESE, FontFamily(Font(R.font.reggaeone_regular))),
-    SONG_MYUNG("songmyung", "송명", FontScript.KOREAN, FontFamily(Font(R.font.songmyung_regular))),
-    NANUM_BRUSH("nanumbrush", "나눔손글씨 붓", FontScript.KOREAN, FontFamily(Font(R.font.nanumbrushscript_regular))),
-    EAST_SEA_DOKDO("eastseadokdo", "동해 독도", FontScript.KOREAN, FontFamily(Font(R.font.eastseadokdo_regular)));
-    // Garamond, Jost and Lora were removed to shrink the bundle (task 10). Their TTFs are deleted
-    // and no code references them. Anyone who had one of them selected falls back to SYSTEM, since
-    // fromKey() maps every unknown key to the platform font — see below.
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Holder>()
 
-    /** The Compose family to apply, or null to leave the platform default in place. */
-    val fontFamily: FontFamily? get() = family
+    /**
+     * The [FontFamily] for a stored font key, or null for the platform default. Null is returned
+     * for [SYSTEM_FONT_KEY], for blank/unknown keys, and for any font that cannot be loaded.
+     *
+     * The first resolution of an id reads the [FontStore] manifest and points a [Font] at the
+     * imported file; afterwards it is a map hit, so this is cheap enough to call from composition
+     * (the settings picker draws every row in its own face through this).
+     */
+    fun resolve(context: Context, fontKey: String?): FontFamily? {
+        if (fontKey.isNullOrBlank() || fontKey == SYSTEM_FONT_KEY) return null
+        return cache.getOrPut(fontKey) {
+            try {
+                val file = FontStore.fontFile(context.applicationContext, fontKey)
+                    ?: return@getOrPut Holder(null)
+                Holder(FontFamily(Font(file)))
+            } catch (_: Throwable) {
+                Holder(null)
+            }
+        }.family
+    }
 
-    companion object {
-        fun fromKey(key: String?): LucentFont = entries.firstOrNull { it.key == key } ?: SYSTEM
+    /** Drop one cached family — call when its font is deleted, so the file's memory can go too. */
+    fun evict(fontKey: String) {
+        cache.remove(fontKey)
+    }
+
+    /** Drop every cached family — call when wiping all data. */
+    fun evictAll() {
+        cache.clear()
     }
 }
 
 /**
- * A [Typography] with every text style switched to [font]'s family. For the system default we
- * return the stock Typography untouched so Compose uses the platform font exactly as before.
+ * A [Typography] with every text style switched to the family [fontKey] resolves to. For the
+ * system default (or anything that fails to resolve) we return the stock Typography untouched so
+ * Compose uses the platform font exactly as before.
  *
  * We only override the family (not sizes/weights), so all of Material 3's type scale — headline,
  * body, label sizes — is preserved; only the glyphs change.
  */
 @Composable
-fun lucentTypography(font: LucentFont): Typography {
+fun lucentTypography(fontKey: String): Typography {
+    val context = LocalContext.current
     val base = Typography()
-    val family = font.fontFamily ?: return base
+    val family = remember(fontKey) { LucentFontResolver.resolve(context, fontKey) } ?: return base
     return base.copy(
         displayLarge = base.displayLarge.copy(fontFamily = family),
         displayMedium = base.displayMedium.copy(fontFamily = family),

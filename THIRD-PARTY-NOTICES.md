@@ -315,27 +315,6 @@ SOFTWARE.
 
 ---
 
-## Fonts — SIL Open Font License, Version 1.1
-
-The following fonts are bundled and licensed under the **SIL Open Font License, Version 1.1**. Each remains © its respective authors. Under the OFL, these fonts may be used, studied, modified, and redistributed freely, but must not be sold on their own, must be distributed under the OFL, and their Reserved Font Names must not be used for modified versions. Full license: https://openfontlicense.org
-
-- **Noto Serif SC** — © The Noto Project Authors (Google)
-- **JetBrains Mono** — © The JetBrains Mono Project Authors (JetBrains)
-- **Song Myung** — © The Song Myung Project Authors
-- **Yuji Mai** — © The Yuji Project Authors
-- **Great Vibes** — © The Great Vibes Project Authors (TypeSETit)
-- **Reggae One** — © The Reggae One Project Authors
-- **Nanum Brush Script** — © Naver Corporation
-- **Cinzel** — © The Cinzel Project Authors (Natanael Gama)
-- **ZCOOL XiaoWei** — © The ZCOOL XiaoWei Project Authors
-- **Zhi Mang Xing** — © The Zhi Mang Xing Project Authors
-- **Shippori Mincho** — © The Shippori Mincho Project Authors
-- **East Sea Dokdo** — © The East Sea Dokdo Project Authors
-
-The complete OFL text is available at the link above and accompanies the font files.
-
----
-
 ## SQLite — Public Domain
 
 **SQLite** (the database engine, used on desktop via the SQLite JDBC driver, and on Android via SQLCipher) is in the **Public Domain**. Reference: https://www.sqlite.org/copyright.html

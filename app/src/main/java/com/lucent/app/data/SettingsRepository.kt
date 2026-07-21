@@ -15,12 +15,13 @@ private val Context.settingsDataStore by preferencesDataStore(name = "lucent_set
 private object SettingsKeys {
     // ---- Display preferences: deliberately NOT encrypted ----
     //
-    // Every value here is drawn from a fixed vocabulary of about ten strings ("dark", "SUNSET",
-    // "title_az"). Encrypting them would protect nothing — an attacker learns that you like dark
-    // mode — while putting a Keystore round-trip on the startup path, which MainActivity reads
-    // *synchronously before the first frame* precisely to avoid a visible theme flash. Paying a real
-    // cost for zero benefit isn't security, it's superstition, and pretending otherwise would make
-    // the encryption story less honest, not more.
+    // Theme and palette are drawn from a fixed vocabulary of short strings ("dark", "SUNSET",
+    // "title_az"); the font is either "system" or the opaque random id of a font the user imported
+    // (see data/FontStore). Encrypting any of them would protect nothing — an attacker learns that
+    // you like dark mode — while putting a Keystore round-trip on the startup path, which
+    // MainActivity reads *synchronously before the first frame* precisely to avoid a visible theme
+    // flash. Paying a real cost for zero benefit isn't security, it's superstition, and pretending
+    // otherwise would make the encryption story less honest, not more.
     val THEME_MODE = stringPreferencesKey("theme_mode")
     val PALETTE = stringPreferencesKey("palette")
     val FONT = stringPreferencesKey("font")
@@ -209,7 +210,9 @@ class SettingsRepository(private val context: Context) {
 
     val themeMode: Flow<String> = context.settingsDataStore.data.map { it[SettingsKeys.THEME_MODE] ?: "system" }
     val palette: Flow<String> = context.settingsDataStore.data.map { it[SettingsKeys.PALETTE] ?: "CYCLE" }
-    // App-wide font choice, stored as a LucentFont.key. Defaults to the platform font.
+    // App-wide font choice: "system" (the platform font, and the out-of-the-box state) or the id
+    // of a font imported through data/FontStore. An id that no longer resolves simply renders as
+    // the system font — see ui/LucentFonts.
     val font: Flow<String> = context.settingsDataStore.data.map { it[SettingsKeys.FONT] ?: "system" }
 
     /** The three display preferences read together, for the pre-first-frame startup snapshot. */

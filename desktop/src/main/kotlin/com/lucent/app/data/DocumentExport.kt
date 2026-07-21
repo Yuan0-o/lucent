@@ -360,16 +360,19 @@ object DocumentExport {
     }
 
     /**
-     * The embedded faces, tried in order per line: Simplified-Chinese serif (covers Latin + the CJK
-     * ideographs), then Korean, then Japanese, then PDFBox's built-in Helvetica as the floor. All
-     * are the app's own bundled fonts, loaded from resources; a face that fails to load is simply
-     * skipped, so a stripped build still produces a (Latin-only) PDF rather than none.
+     * The embedded faces, tried in order per line. The app bundles no fonts any more (font library
+     * task), so the candidates are the fonts the USER has imported — in library order, the same
+     * order the settings picker shows — with PDFBox's built-in Helvetica as the floor. A face that
+     * fails to load (a .ttc collection, a face PDFBox cannot embed) is simply skipped, exactly as a
+     * missing bundled face was before: a device with no imported fonts still produces a
+     * (Latin-only) PDF rather than none, and glyphs no face can encode fall back to "\u00B7".
      */
     private fun loadPdfFonts(doc: PDDocument): List<PDFont> {
         val faces = mutableListOf<PDFont>()
-        for (resource in listOf("/fonts/notoserifsc_regular.ttf", "/fonts/songmyung_regular.ttf", "/fonts/shipporimincho_regular.ttf")) {
+        val context = android.content.DesktopContext
+        for (slot in FontStore.fonts(context)) {
             try {
-                DocumentExport::class.java.getResourceAsStream(resource)?.use { stream ->
+                FontStore.fontFile(context, slot.id)?.inputStream()?.use { stream ->
                     faces.add(PDType0Font.load(doc, stream, true))
                 }
             } catch (_: Throwable) {

@@ -163,6 +163,13 @@ object BackupManager {
     private const val FRAME_MAGIC = 0x4C.toByte()   // 'L'
     private const val FRAME_VERSION = 1.toByte()
 
+    // Framed blob names are name-spaced by destination: an imported font travels as
+    // "font:<fileName>" and is routed to FontStore on restore; any other name is a local model
+    // file — which is also what every pre-v11 backup contains, so old files restore unchanged
+    // without a version check. The prefix never reaches the filesystem (restore strips it before
+    // resolving a target), so no platform's filename rules are in play.
+    private const val FONT_BLOB_PREFIX = "font:"
+
     // Bumped whenever the manifest shape changes. Import reads this only for information; every
     // field added since is read back with a default, so an older manifest inside a `.lcb` still
     // restores cleanly. 8 (this build) covers pin/colour/checklist/trash state, task
@@ -175,7 +182,13 @@ object BackupManager {
     // section is written only when its module was chosen, and the local-model slot manifest travels
     // too. Still purely additive on the read side — every section is optional and every key is
     // guarded by has() — so a v8 or v9 file restores exactly as it always did.
-    private const val BACKUP_VERSION = 10
+    // 11: the imported font library travels (font library task). The settings block gains
+    // "fontLibrary" (the FontStore manifest) and the font files themselves ride as framed blobs
+    // prefixed with FONT_BLOB_PREFIX whenever the SETTINGS module is chosen — unlike model files
+    // they are small enough that opting in per-export would be a question without a point.
+    // Additive as ever: every new key is guarded by has(), and unprefixed blobs still restore as
+    // model files, so a v10 file restores exactly as it always did.
+    private const val BACKUP_VERSION = 11
 
     // ---------------------------------------------------------------------------------------
     // Export
@@ -269,8 +282,21 @@ object BackupManager {
                 }
             } else emptyList()
 
+        // Which imported font files ride along, name-spaced with FONT_BLOB_PREFIX so restore can
+        // route them to FontStore. Fonts travel with the SETTINGS module — they are what the
+        // "font" preference points at, and a restored appearance that silently dropped back to the
+        // system font would be the settings equivalent of an attachment restored as a dead id.
+        val fontFiles: List<Pair<String, java.io.File>> =
+            if (BackupModule.SETTINGS in modules) {
+                FontStore.fonts(context).mapNotNull { slot ->
+                    FontStore.fontFileForSlot(context, slot)
+                        ?.let { (FONT_BLOB_PREFIX + slot.fileName) to it }
+                }
+            } else emptyList()
+
+        val blobs = modelFiles + fontFiles
         BackupCrypto.encryptingStream(out, password).use { cipherOut ->
-            if (modelFiles.isEmpty()) {
+            if (blobs.isEmpty()) {
                 // No blobs: write the plain JSON payload, byte-for-byte the format every previous
                 // release produced. An ordinary backup is therefore completely unchanged, and an
                 // older build could still read it.
@@ -281,13 +307,14 @@ object BackupManager {
             writeInt(cipherOut, jsonBytes.size)
             cipherOut.write(jsonBytes)
             val buffer = ByteArray(1 shl 16)
-            for ((name, file) in modelFiles) {
+            for ((name, file) in blobs) {
                 val nameBytes = name.toByteArray(Charsets.UTF_8)
                 writeInt(cipherOut, nameBytes.size)
                 cipherOut.write(nameBytes)
                 writeLong(cipherOut, file.length())
                 // Streamed in 64 KB pieces: a multi-gigabyte model passes through this loop without
                 // ever existing in memory as a whole, which is the entire reason for the framing.
+                // Fonts share the pipe for uniformity, not need — they are merely megabytes.
                 file.inputStream().use { input ->
                     while (true) {
                         val n = input.read(buffer)
@@ -307,7 +334,8 @@ object BackupManager {
                 (selection.taskIds?.let { "; tasks=${it.size}" } ?: "") +
                 (selection.conversationIds?.let { "; chats=${it.size}" } ?: "") +
                 (selection.apiProfileNames?.let { "; apiProfiles=${it.size}" } ?: "") +
-                "; models=${modelFiles.size}; password=${if (password.isNullOrEmpty()) "no" else "yes"}"
+                "; models=${modelFiles.size}; fonts=${fontFiles.size}" +
+                "; password=${if (password.isNullOrEmpty()) "no" else "yes"}"
         )
     }
 
@@ -351,33 +379,53 @@ object BackupManager {
     }
 
     /**
-     * Write every framed model blob out to the local model directory, returning how many landed.
+     * Write every framed blob out to its destination, returning (model files, fonts) written.
      *
-     * Deliberately best-effort per blob: one unwritable file (out of space, a name the filesystem
-     * rejects) must not abort a restore that has already put the user's notes back.
+     * A blob's name carries its destination: a [FONT_BLOB_PREFIX]-prefixed name is an imported
+     * font (routed to FontStore with the prefix stripped), anything else is a local model file —
+     * which is also what every pre-v11 backup contains, so old files keep restoring without a
+     * version check. Each side is written only when its module was chosen, and each blob is
+     * deliberately best-effort: one unwritable file (out of space, a name the filesystem rejects)
+     * must not abort a restore that has already put the user's notes back.
      */
-    private fun restoreModelBlobs(context: Context, payload: ByteArray, from: Int): Int {
+    private fun restoreBlobs(
+        context: Context,
+        payload: ByteArray,
+        from: Int,
+        wantModels: Boolean,
+        wantFonts: Boolean
+    ): Pair<Int, Int> {
         var at = from
-        var written = 0
+        var models = 0
+        var fonts = 0
         while (at + 4 <= payload.size) {
             val nameLen = readInt(payload, at); at += 4
             if (nameLen <= 0 || at + nameLen + 8 > payload.size) break
             val name = String(payload, at, nameLen, Charsets.UTF_8); at += nameLen
             val dataLen = readLong(payload, at); at += 8
             if (dataLen < 0 || at + dataLen > payload.size) break
-            try {
-                val target = com.lucent.app.local.LocalModelStore.prepareRestoreTarget(context, name)
-                // Straight to a temp file and renamed into place, so an interrupted restore can
-                // never leave a half-written model that the engine would then try to load.
-                val tmp = java.io.File(target.absolutePath + ".tmp")
-                tmp.outputStream().use { out -> out.write(payload, at, dataLen.toInt()) }
-                if (target.exists()) target.delete()
-                if (tmp.renameTo(target)) written++ else tmp.delete()
-            } catch (_: Throwable) {
+            val isFont = name.startsWith(FONT_BLOB_PREFIX)
+            if ((isFont && wantFonts) || (!isFont && wantModels)) {
+                try {
+                    val target = if (isFont) {
+                        FontStore.prepareRestoreTarget(context, name.removePrefix(FONT_BLOB_PREFIX))
+                    } else {
+                        com.lucent.app.local.LocalModelStore.prepareRestoreTarget(context, name)
+                    }
+                    // Straight to a temp file and renamed into place, so an interrupted restore can
+                    // never leave a half-written payload that the app would then try to load.
+                    val tmp = java.io.File(target.absolutePath + ".tmp")
+                    tmp.outputStream().use { out -> out.write(payload, at, dataLen.toInt()) }
+                    if (target.exists()) target.delete()
+                    if (tmp.renameTo(target)) {
+                        if (isFont) fonts++ else models++
+                    } else tmp.delete()
+                } catch (_: Throwable) {
+                }
             }
             at += dataLen.toInt()
         }
-        return written
+        return models to fonts
     }
 
     /**
@@ -551,6 +599,12 @@ object BackupManager {
             .put("themeMode", settings.themeMode.first())
             .put("palette", settings.palette.first())
             .put("font", settings.font.first())
+            // The imported font library's manifest: which fonts exist and what the user named
+            // them. The font *files* ride as framed blobs (see exportEncrypted); this is the
+            // labelling half, kept in the settings block the same way the model slot manifest is
+            // kept in the local-assistant block — names without files restore as an honest nothing,
+            // files without names would restore as anonymous blobs.
+            .put("fontLibrary", FontStore.exportManifestJson(context))
             .put("assistantName", settings.assistantName.first())
             .put("assistantStyle", settings.assistantStyle.first())
         // (The multi-API profile JSON is written in the consolidated API block above, task F1.)
@@ -699,6 +753,9 @@ object BackupManager {
         /** How many local model files are attached as framed blobs, and their combined size. */
         val modelFiles: Int = 0,
         val modelBytes: Long = 0L,
+        /** How many imported fonts are attached as framed blobs, and their combined size. */
+        val fontFiles: Int = 0,
+        val fontBytes: Long = 0L,
         /** Where the blobs start in the decrypted payload, or -1 when there are none. */
         internal val blobOffset: Int = -1,
         /** The decrypted payload, retained only when there are blobs to write out on commit. */
@@ -719,7 +776,7 @@ object BackupManager {
         /** True when the file parsed but holds nothing worth restoring. */
         val isEmpty: Boolean
             get() = notes == 0 && tasks == 0 && chatMessages == 0 && conversations == 0 &&
-                !hasSettings && modelFiles == 0
+                !hasSettings && modelFiles == 0 && fontFiles == 0
     }
 
     /**
@@ -771,21 +828,29 @@ object BackupManager {
             attachments += Attachments.parse(o.optString("attachments", "[]")).size
         }
 
-        // Walk the blob frames to count and size them, WITHOUT copying any of the bytes — the
-        // preview only needs to be able to say "and 2 model files, 3.1 GB", which is exactly the
-        // fact a user needs before agreeing to a restore of that size.
+        // Walk the blob frames to count and size them, WITHOUT copying any of the payload bytes —
+        // the preview only needs to be able to say "2 model files, 3.1 GB; 4 imported fonts",
+        // which is exactly the fact a user needs before agreeing to a restore of that size. The
+        // short blob NAMES are read, purely to tell font blobs from model blobs by their prefix.
         var modelCount = 0
         var modelBytes = 0L
+        var fontCount = 0
+        var fontBytes = 0L
         if (blobOffset >= 0) {
             var at = blobOffset
             while (at + 4 <= payload.size) {
                 val nameLen = readInt(payload, at); at += 4
                 if (nameLen <= 0 || at + nameLen + 8 > payload.size) break
-                at += nameLen
+                val name = String(payload, at, nameLen, Charsets.UTF_8); at += nameLen
                 val dataLen = readLong(payload, at); at += 8
                 if (dataLen < 0 || at + dataLen > payload.size) break
-                modelCount++
-                modelBytes += dataLen
+                if (name.startsWith(FONT_BLOB_PREFIX)) {
+                    fontCount++
+                    fontBytes += dataLen
+                } else {
+                    modelCount++
+                    modelBytes += dataLen
+                }
                 at += dataLen.toInt()
             }
         }
@@ -828,6 +893,8 @@ object BackupManager {
             } ?: emptySet(),
             modelFiles = modelCount,
             modelBytes = modelBytes,
+            fontFiles = fontCount,
+            fontBytes = fontBytes,
             blobOffset = blobOffset,
             payload = if (blobOffset >= 0) payload else null,
             conversationList = convList,
@@ -853,14 +920,22 @@ object BackupManager {
         conversationIds: Set<Long>? = null,
         apiProfileNames: Set<String>? = null
     ): String {
-        // Model files first, and deliberately so: the manifest's slot list is only adopted for
-        // slots whose file is actually present (see LocalModelStore.restoreFromBackup), so the
-        // payloads have to be on disk before the settings block is read or every restored slot
-        // would be discarded as dangling.
+        // Blobs first, and deliberately so: the model slot manifest and the font library manifest
+        // are each adopted only for files actually present on disk (see the two restoreFromBackup
+        // implementations), so the payloads have to land before the settings block is read or
+        // every restored slot would be discarded as dangling. Model files restore under their own
+        // opt-in module; fonts restore with the SETTINGS module they travelled with.
         var restoredModels = 0
+        var restoredFonts = 0
         val payload = preview.payload
-        if (BackupModule.LOCAL_MODEL_FILES in modules && payload != null && preview.blobOffset >= 0) {
-            restoredModels = restoreModelBlobs(context, payload, preview.blobOffset)
+        if (payload != null && preview.blobOffset >= 0) {
+            val wantModels = BackupModule.LOCAL_MODEL_FILES in modules
+            val wantFonts = BackupModule.SETTINGS in modules
+            if (wantModels || wantFonts) {
+                val (m, f) = restoreBlobs(context, payload, preview.blobOffset, wantModels, wantFonts)
+                restoredModels = m
+                restoredFonts = f
+            }
         }
         val summary = importJson(
             context, db, settings, preview.manifestJson, modules, conversationIds, apiProfileNames
@@ -872,11 +947,12 @@ object BackupManager {
             "Backup restored: modules=${modules.joinToString(",") { it.name }}" +
                 (conversationIds?.let { "; chats=${it.size}" } ?: "") +
                 (apiProfileNames?.let { "; apiProfiles=${it.size}" } ?: "") +
-                "; models=$restoredModels"
+                "; models=$restoredModels; fonts=$restoredFonts"
         )
-        return if (restoredModels > 0) {
-            summary + com.lucent.app.i18n.S.backupModelFilesRestored(restoredModels)
-        } else summary
+        var report = summary
+        if (restoredModels > 0) report += com.lucent.app.i18n.S.backupModelFilesRestored(restoredModels)
+        if (restoredFonts > 0) report += com.lucent.app.i18n.S.backupFontsRestored(restoredFonts)
+        return report
     }
 
     /**
@@ -1113,7 +1189,26 @@ object BackupManager {
             if (wholeApi && s.has("model")) settings.setModel(s.optString("model"))
             if (restoreGeneral && s.has("themeMode")) settings.setThemeMode(s.optString("themeMode"))
             if (restoreGeneral && s.has("palette")) settings.setPalette(s.optString("palette"))
-            if (restoreGeneral && s.has("font")) settings.setFont(s.optString("font"))
+            // The imported font library. Adopted BEFORE the font key below, and only for files this
+            // restore actually delivered (see FontStore.restoreFromBackup — the blobs were written
+            // before importJson was even called), so the key can be validated against what really
+            // exists on this device.
+            if (restoreGeneral && s.has("fontLibrary")) {
+                try {
+                    FontStore.restoreFromBackup(context, s.optString("fontLibrary"))
+                } catch (_: Throwable) {
+                }
+            }
+            if (restoreGeneral && s.has("font")) {
+                // Never restore the font key into a lie: a backup made where a font existed may be
+                // restored where its file did not land. "system" and any id that resolves are kept;
+                // anything else becomes "system", so the picker never shows a selection that cannot
+                // render. The same confirmed-against-reality shape as localModelEnabled below.
+                val wantFont = s.optString("font")
+                val resolvable = wantFont == "system" ||
+                    runCatching { FontStore.fontFile(context, wantFont) }.getOrNull() != null
+                settings.setFont(if (resolvable) wantFont else "system")
+            }
             if (restoreGeneral && s.has("assistantName")) settings.setAssistantName(s.optString("assistantName"))
             if (restoreGeneral && s.has("assistantStyle")) settings.setAssistantStyle(s.optString("assistantStyle"))
             // API profiles (keys already encrypted inside the JSON).

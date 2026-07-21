@@ -70,6 +70,7 @@ import com.lucent.app.data.AppDatabase
 import com.lucent.app.data.AppLock
 import com.lucent.app.data.AttachmentLimits
 import com.lucent.app.data.BackupManager
+import com.lucent.app.data.FontStore
 import com.lucent.app.security.WindowsHello
 import com.lucent.app.data.MemoryTier
 import com.lucent.app.data.SettingsRepository
@@ -481,6 +482,82 @@ fun SettingsScreen(active: Boolean = true) {
         }
     }
 
+    // --- Imported font state (font library task) ---
+    //
+    // Same shape as the local-model state above, at a smaller scale: fontRefresh is a change
+    // counter, and bumping it makes the remember() below re-read the store so the picker reflects
+    // an import/delete immediately without a second source of truth.
+    var fontRefresh by remember { mutableStateOf(0) }
+    val importedFonts = remember(fontRefresh) { FontStore.index(context) }.slots
+    val fontCanImportMore = importedFonts.size < FontStore.MAX_FONTS
+    var fontImporting by remember { mutableStateOf(false) }
+    var fontError by remember { mutableStateOf("") }
+    // The font the user has asked to delete, held until they confirm. Deleting always asks first.
+    var fontPendingDelete by remember { mutableStateOf<FontStore.FontSlot?>(null) }
+    // A just-picked font file awaiting a name before it is imported (null = no naming dialog up).
+    // Holding the File lets the user label the font at import time (custom names, task requirement).
+    var fontPendingImportFile by remember { mutableStateOf<File?>(null) }
+    var fontImportName by remember { mutableStateOf("") }
+
+    // The font picker. A native open dialog on the AWT thread, unfiltered for the same reason the
+    // GGUF picker is: FontStore validates the actual bytes (TTF/OTF/TTC magic) and rejects
+    // everything else with a clear message. Picking doesn't import straight away: it stages the
+    // File and opens a naming dialog first.
+    fun pickImportFont() {
+        if (fontImporting) return
+        val file = DesktopFiles.openFile() ?: return
+        fontError = ""
+        // Default the name to the picked file's name (minus extension); the user can edit it.
+        fontImportName = file.name.substringBeforeLast('.').take(60)
+        fontPendingImportFile = file
+    }
+
+    // Run the staged font import under the chosen name. The new font becomes the app font right
+    // away — it is the one the user just added, and the immediate whole-app change doubles as the
+    // clearest possible confirmation that the import worked.
+    fun startFontImport(file: File, name: String) {
+        if (fontImporting) return
+        fontImporting = true
+        fontError = ""
+        scope.launch {
+            var importedId: String? = null
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    importedId = FontStore.import(context, file, name).id
+                    null
+                } catch (e: FontStore.TooManyFontsException) {
+                    S.fontImportFailedTooMany(FontStore.MAX_FONTS)
+                } catch (e: FontStore.NotFontException) {
+                    S.fontImportFailedNotFont
+                } catch (e: Exception) {
+                    S.fontImportFailedGeneric(e.message ?: "")
+                }
+            }
+            fontImporting = false
+            if (error == null) {
+                importedId?.let { id -> AppScope.io.launch { repo.setFont(id) } }
+                fontRefresh++
+                LucentToast.show(context.applicationContext, S.fontImportedToast)
+            } else {
+                fontError = error
+            }
+        }
+    }
+
+    // Delete an imported font. If it is the selected font, the preference falls back to the
+    // system font FIRST, so no frame is ever asked to render from a family whose file is gone;
+    // the cached FontFamily is dropped for the same reason.
+    fun deleteImportedFont(slot: FontStore.FontSlot) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                if (savedFont == slot.id) repo.setFont(SYSTEM_FONT_KEY)
+                FontStore.delete(context, slot.id)
+            }
+            LucentFontResolver.evict(slot.id)
+            fontRefresh++
+        }
+    }
+
     var route by rememberSaveable { mutableStateOf(SettingsRoute.Root) }
 
     // --- Unsaved-changes guard for the Personalization sub-screen ---
@@ -809,6 +886,18 @@ fun SettingsScreen(active: Boolean = true) {
                         onChange = { exportModules = it }
                     )
                     BackupModuleRow(S.backupModSettings, BackupManager.BackupModule.SETTINGS, exportModules) { exportModules = it }
+                    // Settings quietly carries the imported font files with it (they are what the
+                    // font preference points at — see BackupManager). Unlike model files they are
+                    // small, so they get no opt-out of their own, but the size is still quoted:
+                    // a module that adds megabytes to the file should say so where it is ticked.
+                    val importedFontBytes = remember { FontStore.totalFontBytes(context) }
+                    if (importedFontBytes > 0L) {
+                        Text(
+                            S.backupModSettingsFontsDesc(AttachmentLimits.formatBytes(importedFontBytes)),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
+                        )
+                    }
                     // API likewise: include every saved connection, or pick which ones. The drill-in
                     // is gated on realProfiles so its indices match what BackupManager filters on; a
                     // fresh install still on the flat keys just gets the whole-API tick.
@@ -1113,6 +1202,13 @@ fun SettingsScreen(active: Boolean = true) {
                                 S.backupModLocalModelFiles,
                                 preview.modelFiles,
                                 listOf(AttachmentLimits.formatBytes(preview.modelBytes))
+                            )
+                        }
+                        if (preview.fontFiles > 0) {
+                            BackupContentLine(
+                                S.bkImportedFonts,
+                                preview.fontFiles,
+                                listOf(AttachmentLimits.formatBytes(preview.fontBytes))
                             )
                         }
 
@@ -1560,6 +1656,17 @@ fun SettingsScreen(active: Boolean = true) {
                         com.lucent.app.local.LocalLlm.shutdown()
                         com.lucent.app.local.LocalModelStore.deleteAll(appContext)
 
+                        // ---- The imported fonts (font library task) ----
+                        //
+                        // Same reasoning as the models above, at font scale: imported font files
+                        // are user data on disk that repo.clearAll() knows nothing about, so a
+                        // wipe must sweep them explicitly. The cached FontFamily objects go too —
+                        // the font preference has just been reset to "system" by repo.clearAll(),
+                        // and a family built from a deleted file must not survive to be handed
+                        // out again if a later import mints a new library.
+                        FontStore.deleteAll(appContext)
+                        LucentFontResolver.evictAll()
+
                         // ---- Diagnostics and one-off markers ----
                         com.lucent.app.data.StartupLog.clear(appContext)
                         com.lucent.app.data.StartupLog.setEnabled(false)
@@ -1789,6 +1896,60 @@ fun SettingsScreen(active: Boolean = true) {
         )
     }
     lmRenameTarget?.let { RenameLocalModelDialog(it) }
+
+    // --- Imported fonts: per-font delete confirmation (font library task) ---
+    // Deleting always asks first. The helper resets the selection to the system font before the
+    // file goes, so nothing is ever asked to render from a family whose file is missing.
+    @Composable
+    @NonRestartableComposable
+    fun DeleteImportedFontDialog(slot: FontStore.FontSlot) {
+        AlertDialog(
+            onDismissRequest = { fontPendingDelete = null },
+            title = { Text(S.fontDeleteTitle) },
+            text = { Text(S.fontDeleteBody(slot.name.ifBlank { slot.fileName })) },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteImportedFont(slot)
+                    fontPendingDelete = null
+                }) { Text(S.actionDelete) }
+            },
+            dismissButton = { TextButton(onClick = { fontPendingDelete = null }) { Text(S.actionCancel) } }
+        )
+    }
+    fontPendingDelete?.let { DeleteImportedFontDialog(it) }
+
+    // --- Imported fonts: name a font at import time (custom names, task requirement) ---
+    // The file is already picked; this captures the label before the copy runs. Cancelling here
+    // drops the pending import entirely (nothing was copied yet).
+    @Composable
+    @NonRestartableComposable
+    fun NameImportedFontDialog(file: File) {
+        AlertDialog(
+            onDismissRequest = { fontPendingImportFile = null },
+            title = { Text(S.fontNameTitle) },
+            text = {
+                Column {
+                    Text(S.fontNameBody, color = onGradientMuted, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = fontImportName,
+                        onValueChange = { fontImportName = it.take(60) },
+                        label = { Text(S.fontNameField) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    fontPendingImportFile = null
+                    startFontImport(file, fontImportName)
+                }) { Text(S.lmImportConfirm) }
+            },
+            dismissButton = { TextButton(onClick = { fontPendingImportFile = null }) { Text(S.actionCancel) } }
+        )
+    }
+    fontPendingImportFile?.let { NameImportedFontDialog(it) }
 
     // --- Local model: warn before turning "use local model" ON ---
     // Enabling local mode freezes the cloud API and loads a multi-gigabyte model into RAM, so it
@@ -2074,52 +2235,93 @@ fun SettingsScreen(active: Boolean = true) {
             }
             Spacer(modifier = Modifier.height(12.dp))
             // Font sits inline here, parallel to the language picker above rather than behind a
-            // further tap: a typeface is a writing/language choice as much as a visual one. Each
-            // row is drawn in its own face so the list doubles as a live preview; selecting saves
-            // immediately. Grouped by writing system with a localized header.
+            // further tap: a typeface is a writing/language choice as much as a visual one. The app
+            // bundles no fonts (font library task): out of the box it follows the platform font,
+            // and every other row is a font the user imported, shown under the name they gave it
+            // and drawn in its own face so the list doubles as a live preview. Selecting saves
+            // immediately; the trailing icon deletes an imported font (after confirming).
             Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
                 Text(S.settingsFontTitle, color = onGradient, fontSize = 16.sp)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(S.settingsFontSub, color = onGradientMuted, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(6.dp))
 
-                @Composable
-               fun fontRow(f: LucentFont, shownLabel: String) {
+                // The system-default row. Also selected when the saved key is a dangling id (a
+                // state only reachable by hand-editing storage): the app *renders* the system font
+                // then, and the radio must tell the truth about what is on screen.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().clickable {
+                        AppScope.io.launch { repo.setFont(SYSTEM_FONT_KEY) }
+                    }
+                ) {
+                    RadioButton(
+                        selected = savedFont == SYSTEM_FONT_KEY || importedFonts.none { it.id == savedFont },
+                        onClick = { AppScope.io.launch { repo.setFont(SYSTEM_FONT_KEY) } }
+                    )
+                    Text(
+                        S.fontSystemLabel,
+                        color = onGradient,
+                        fontSize = 16.sp,
+                        modifier = Modifier.padding(start = 10.dp)
+                    )
+                }
+
+                // One row per imported font: radio + the user's name for it + delete. Same anatomy
+                // as the system row, plus the trailing delete — an imported font is the user's to
+                // remove, the platform default is not.
+                importedFonts.forEach { slot ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().clickable {
-                            AppScope.io.launch { repo.setFont(f.key) }
+                            AppScope.io.launch { repo.setFont(slot.id) }
                         }
                     ) {
                         RadioButton(
-                            selected = savedFont == f.key,
-                            onClick = { AppScope.io.launch { repo.setFont(f.key) } }
+                            selected = savedFont == slot.id,
+                            onClick = { AppScope.io.launch { repo.setFont(slot.id) } }
                         )
                         Text(
-                            shownLabel,
+                            slot.name.ifBlank { slot.fileName },
                             color = onGradient,
-                            fontFamily = f.fontFamily,
+                            fontFamily = LucentFontResolver.resolve(context, slot.id),
                             fontSize = 16.sp,
-                            modifier = Modifier.padding(start = 10.dp)
+                            modifier = Modifier.weight(1f).padding(start = 10.dp)
                         )
+                        IconButton(onClick = { fontPendingDelete = slot }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = S.fontDeleteA11y,
+                                tint = onGradientMuted
+                            )
+                        }
                     }
                 }
-
-                @Composable
-               fun fontGroup(header: String, script: FontScript) {
-                    Text(
-                        header,
-                        color = onGradientMuted,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
-                    )
-                    LucentFont.entries.filter { it.script == script }.forEach { fontRow(it, it.label) }
+                if (importedFonts.isEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(S.fontNoneImportedHint, color = onGradientMuted, fontSize = 12.sp)
                 }
 
-                fontRow(LucentFont.SYSTEM, S.fontSystemLabel)
-                fontGroup(S.fontGroupEnglish, FontScript.LATIN)
-                fontGroup(S.fontGroupChinese, FontScript.CHINESE)
-                fontGroup(S.fontGroupJapanese, FontScript.JAPANESE)
-                fontGroup(S.fontGroupKorean, FontScript.KOREAN)
+                Spacer(modifier = Modifier.height(12.dp))
+                if (fontImporting) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(S.fontImporting, color = onGradientMuted, fontSize = 13.sp)
+                    }
+                } else if (fontCanImportMore) {
+                    GlassButton(
+                        text = S.fontImportButton,
+                        icon = Icons.Default.Add,
+                        onClick = { pickImportFont() }
+                    )
+                } else {
+                    Text(S.fontSlotsFullHint(FontStore.MAX_FONTS), color = onGradientMuted, fontSize = 12.sp)
+                }
+                if (fontError.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(fontError, color = Color(0xFFFFC1C1), fontSize = 13.sp)
+                }
             }
         }
 

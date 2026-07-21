@@ -1,80 +1,80 @@
 package com.lucent.app.ui
 
+import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.platform.Font
+import com.lucent.app.data.FontStore
 
 /**
- * Desktop twin of the Android LucentFonts.
+ * Desktop twin of the Android LucentFonts — how a stored font preference becomes a [FontFamily].
  *
- * Same twelve bundled typefaces, same keys, same native-name labels, same grouped picker data —
- * the identical TTF files ship in the desktop resources under /fonts. The only adaptation is how a
- * [FontFamily] is built: Android references generated font resources; desktop loads the bytes from
- * the classpath through Compose's desktop `Font(identity, data)` constructor. Families are built
- * lazily and cached so the twelve files are only read when actually selected/previewed, and a
- * missing resource degrades to the platform font instead of crashing.
+ * The app ships no fonts (font library task). The preference (SettingsRepository.font) holds
+ * either [SYSTEM_FONT_KEY] — the platform default, and the out-of-the-box state — or the id of a
+ * font the user imported through [FontStore]. This file is the only place that mapping happens:
+ * the settings picker previews rows through [LucentFontResolver], and the app-wide Typography is
+ * built from the same cache through [lucentTypography], so the two can never disagree.
+ *
+ * The only adaptation from Android is how a family is built: Android points a Font at the imported
+ * file; desktop reads the file's bytes and hands them to Compose's desktop `Font(identity, data)`
+ * constructor. Families are built lazily and cached, and anything that fails to load resolves to
+ * null — the system font — never to a crash or to tofu.
  */
-enum class FontScript { SYSTEM, LATIN, CHINESE, JAPANESE, KOREAN }
+const val SYSTEM_FONT_KEY = "system"
 
-enum class LucentFont(
-    val key: String,
-    val label: String,
-    val script: FontScript,
-    private val resource: String?
-) {
-    SYSTEM("system", "System", FontScript.SYSTEM, null),
+object LucentFontResolver {
 
-    // ---- Latin / English (three faces) ----
-    JETBRAINS("jetbrains", "JetBrains Mono", FontScript.LATIN, "jetbrainsmono_regular.ttf"),
-    GREAT_VIBES("greatvibes", "Great Vibes", FontScript.LATIN, "greatvibes_regular.ttf"),
-    CINZEL("cinzel", "Cinzel", FontScript.LATIN, "cinzel_regular.ttf"),
-
-    // ---- CJK families — three faces per script, labelled in their own native names ----
-    NOTO_SERIF_SC("notoserifsc", "\u601d\u6e90\u5b8b\u4f53", FontScript.CHINESE, "notoserifsc_regular.ttf"),
-    ZCOOL_XIAOWEI("zcoolxiaowei", "\u7ad9\u9177\u5c0f\u8587", FontScript.CHINESE, "zcoolxiaowei_regular.ttf"),
-    ZHI_MANG_XING("zhimangxing", "\u5fd7\u83bd\u884c\u4e66", FontScript.CHINESE, "zhimangxing_regular.ttf"),
-    SHIPPORI_MINCHO("shipporimincho", "\u3057\u3063\u307d\u308a\u660e\u671d", FontScript.JAPANESE, "shipporimincho_regular.ttf"),
-    YUJI_MAI("yujimai", "\u4f51\u5b57\u821e", FontScript.JAPANESE, "yujimai_regular.ttf"),
-    REGGAE_ONE("reggaeone", "\u30ec\u30b2\u30a8 One", FontScript.JAPANESE, "reggaeone_regular.ttf"),
-    SONG_MYUNG("songmyung", "\uc1a1\uba85", FontScript.KOREAN, "songmyung_regular.ttf"),
-    NANUM_BRUSH("nanumbrush", "\ub098\ub214\uc190\uae00\uc528 \ubd93", FontScript.KOREAN, "nanumbrushscript_regular.ttf"),
-    EAST_SEA_DOKDO("eastseadokdo", "\ub3d9\ud574 \ub3c5\ub3c4", FontScript.KOREAN, "eastseadokdo_regular.ttf");
-
-    /** The Compose family to apply, or null to leave the platform default in place. */
-    val fontFamily: FontFamily?
-        get() {
-            val res = resource ?: return null
-            return cache.getOrPut(key) {
-                try {
-                    val bytes = LucentFont::class.java.getResourceAsStream("/fonts/$res")
-                        ?.use { it.readBytes() }
-                        ?: return@getOrPut Holder(null)
-                    Holder(FontFamily(Font(identity = key, data = bytes)))
-                } catch (t: Throwable) {
-                    Holder(null)
-                }
-            }.family
-        }
-
-    // getOrPut needs a non-null value even for "load failed", hence the tiny holder.
+    // getOrPut needs a non-null value even for "load failed", hence the tiny holder. Caching a
+    // failure is correct here: ids are minted once per import and never reused, so a file that
+    // failed to load will not silently become loadable under the same id.
     private class Holder(val family: FontFamily?)
 
-    companion object {
-        private val cache = java.util.concurrent.ConcurrentHashMap<String, Holder>()
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Holder>()
 
-        fun fromKey(key: String?): LucentFont = entries.firstOrNull { it.key == key } ?: SYSTEM
+    /**
+     * The [FontFamily] for a stored font key, or null for the platform default. Null is returned
+     * for [SYSTEM_FONT_KEY], for blank/unknown keys, and for any font that cannot be loaded.
+     *
+     * The first resolution of an id reads the [FontStore] manifest and the font file's bytes;
+     * afterwards it is a map hit, so this is cheap enough to call from composition (the settings
+     * picker draws every row in its own face through this).
+     */
+    fun resolve(context: Context, fontKey: String?): FontFamily? {
+        if (fontKey.isNullOrBlank() || fontKey == SYSTEM_FONT_KEY) return null
+        return cache.getOrPut(fontKey) {
+            try {
+                val file = FontStore.fontFile(context.applicationContext, fontKey)
+                    ?: return@getOrPut Holder(null)
+                Holder(FontFamily(Font(identity = fontKey, data = file.readBytes())))
+            } catch (_: Throwable) {
+                Holder(null)
+            }
+        }.family
+    }
+
+    /** Drop one cached family — call when its font is deleted, so the file's memory can go too. */
+    fun evict(fontKey: String) {
+        cache.remove(fontKey)
+    }
+
+    /** Drop every cached family — call when wiping all data. */
+    fun evictAll() {
+        cache.clear()
     }
 }
 
 /**
- * A [Typography] with every text style switched to [font]'s family — verbatim from Android: only
- * the family is overridden, so Material 3's full type scale is preserved.
+ * A [Typography] with every text style switched to the family [fontKey] resolves to — verbatim
+ * from Android: only the family is overridden, so Material 3's full type scale is preserved.
  */
 @Composable
-fun lucentTypography(font: LucentFont): Typography {
+fun lucentTypography(fontKey: String): Typography {
+    val context = LocalContext.current
     val base = Typography()
-    val family = font.fontFamily ?: return base
+    val family = remember(fontKey) { LucentFontResolver.resolve(context, fontKey) } ?: return base
     return base.copy(
         displayLarge = base.displayLarge.copy(fontFamily = family),
         displayMedium = base.displayMedium.copy(fontFamily = family),
