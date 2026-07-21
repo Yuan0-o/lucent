@@ -767,9 +767,15 @@ fun TasksScreen(active: Boolean = true) {
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Pin-to-top sits directly under the details box, exactly like a note's pin switch
-                    // (task 11) — so the two composers line up rather than burying the task's pin far
-                    // down among the scheduling controls.
+                    // Priority sits directly under the details box: how important a task is gets
+                    // decided while it is still being described, so the chips moved up here from
+                    // below the scheduling block (where they used to trail the due date).
+                    PriorityPickerRow(selected = priority, onSelect = { priority = it })
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Pin-to-top, exactly like a note's pin switch (task 11) — so the two composers
+                    // line up rather than burying the task's pin far down among the scheduling
+                    // controls.
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             Icons.Default.PushPin,
@@ -815,15 +821,10 @@ fun TasksScreen(active: Boolean = true) {
                         RepeatRuleRow(selected = repeatRule, onSelect = { repeatRule = it })
                     }
 
+                    // Attachments close the form as a due-date-style row: same icon + label anatomy
+                    // as the rows above, tap anywhere on it to pick a file, chips listed beneath.
+                    // See [AttachmentSection].
                     Spacer(modifier = Modifier.height(12.dp))
-                    PriorityPickerRow(selected = priority, onSelect = { priority = it })
-
-                    // Same labelled section as the note composer (task 13). Previously this was an
-                    // unlabelled icon+text row pressed directly against the priority chips above and
-                    // the Add button below, with the file chips landing flush against it — three
-                    // unrelated controls at one visual level, 8dp apart, and the optional one reading
-                    // as an afterthought stuck to the primary action.
-                    Spacer(modifier = Modifier.height(16.dp))
                     AttachmentSection(
                         attachments = pendingAttachments,
                         onPick = { filePicker.launch("*/*") },
@@ -833,8 +834,8 @@ fun TasksScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    // Enlarged so this primary action clearly outweighs the now-compact attachment
-                    // button above it (previously the attachment pill was the larger of the two).
+                    // Enlarged so this primary action clearly outweighs the slim attachment row
+                    // above it.
                     Button(
                         onClick = { saveTask() },
                         contentPadding = PaddingValues(horizontal = 30.dp, vertical = 15.dp)

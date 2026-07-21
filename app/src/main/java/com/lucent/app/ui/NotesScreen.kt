@@ -888,9 +888,10 @@ fun NotesScreen(active: Boolean = true) {
                         }
                     }
 
-                    // Attachments get a labelled section of their own instead of a bare text button
-                    // wedged between the tag field and Save (task 13). See [AttachmentSection].
-                    Spacer(modifier = Modifier.height(16.dp))
+                    // Attachments close the form as a due-date-style row (matching the task
+                    // composer): icon + label, tap anywhere on it to pick a file, chips listed
+                    // beneath. See [AttachmentSection].
+                    Spacer(modifier = Modifier.height(12.dp))
                     AttachmentSection(
                         attachments = pendingAttachments,
                         onPick = { filePicker.launch("*/*") },
@@ -900,8 +901,8 @@ fun NotesScreen(active: Boolean = true) {
                     )
 
                     Spacer(modifier = Modifier.height(20.dp))
-                    // Enlarged so this primary action clearly outweighs the now-compact attachment
-                    // button above it (previously the attachment pill was the larger of the two).
+                    // Enlarged so this primary action clearly outweighs the slim attachment row
+                    // above it.
                     Button(
                         onClick = { saveNote() },
                         contentPadding = PaddingValues(horizontal = 30.dp, vertical = 15.dp)
