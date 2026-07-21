@@ -9,6 +9,7 @@ import com.lucent.app.data.Attachments
 import com.lucent.app.data.Checklist
 import com.lucent.app.data.DueParsing
 import com.lucent.app.data.Note
+import com.lucent.app.data.NoteHistory
 import com.lucent.app.data.RepeatRule
 import com.lucent.app.data.SearchQuery
 import com.lucent.app.data.Task
@@ -39,10 +40,15 @@ import org.json.JSONObject
  * to confirm the file is really gone before claiming it is. The assistant can only say "done" when
  * the store agrees.
  *
- * **It can't touch what the user can't see.** Every lookup goes through [activeNotes] /
- * [activeTasks], which exclude trashed rows. Without that, the assistant could read, edit, or attach
- * files to something the user has deleted and can no longer even find — which is exactly the kind of
- * spooky action that destroys trust in an assistant with write access.
+ * **It can't touch what the user can't see.** Every working lookup goes through [activeNotes] /
+ * [activeTasks], which exclude trashed rows, so the assistant can never quietly read, edit, or
+ * attach files to something the user believes they deleted — exactly the kind of spooky action
+ * that destroys trust in an assistant with write access. The Trash itself is different: the user
+ * CAN see it, on the Trash screens, so the assistant gets exactly the two abilities those screens
+ * offer and nothing more — listing what's there (list_trash) and restoring items out of it
+ * (restore_note_from_trash / restore_task_from_trash), which go through [trashedNotes] /
+ * [trashedTasks]. Working on a trashed row in place, or deleting anything permanently, stays
+ * impossible from here.
  *
  * **It behaves identically to the UI.** Completing, trashing, and rescheduling all route through
  * [TaskActions], the same code the buttons call. Ask the assistant to tick off a repeating task and
@@ -71,7 +77,8 @@ object AppTools {
      * an explicit confirm before it executes.
      */
     private val READ_ONLY_TOOLS = setOf(
-        "list_notes", "read_note", "list_tasks", "read_task", "search_items", "web_search"
+        "list_notes", "read_note", "list_tasks", "read_task", "search_items", "web_search",
+        "read_attachment", "list_note_versions", "list_trash"
     )
 
     /** Whether calling [name] would change the user's notes/tasks (and therefore needs confirmation). */
@@ -103,6 +110,9 @@ object AppTools {
             "set_note_attachment" -> com.lucent.app.i18n.S.ccSaveFileOnNote(s("file_name"), title)
             "remove_note_attachment" -> com.lucent.app.i18n.S.ccRemoveFileFromNote(s("file_name"), title)
             "attach_upload_to_note" -> com.lucent.app.i18n.S.ccAttachUploadToNote(title)
+            "set_note_checklist_mode" -> if (a.optBoolean("checklist", true)) com.lucent.app.i18n.S.ccNoteToChecklist(title) else com.lucent.app.i18n.S.ccNoteToText(title)
+            "restore_note_version" -> com.lucent.app.i18n.S.ccRestoreNoteVersion(title, a.optInt("version", 1).toString())
+            "restore_note_from_trash" -> com.lucent.app.i18n.S.ccRestoreNoteFromTrash(title)
             "create_task" -> com.lucent.app.i18n.S.ccCreateTask(s("title")) + dueSuffix(s("due"))
             "complete_task" -> com.lucent.app.i18n.S.ccCompleteTask(title)
             "reopen_task" -> com.lucent.app.i18n.S.ccReopenTask(title)
@@ -118,6 +128,7 @@ object AppTools {
             "set_task_attachment" -> com.lucent.app.i18n.S.ccSaveFileOnTask(s("file_name"), title)
             "remove_task_attachment" -> com.lucent.app.i18n.S.ccRemoveFileFromTask(s("file_name"), title)
             "attach_upload_to_task" -> com.lucent.app.i18n.S.ccAttachUploadToTask(title)
+            "restore_task_from_trash" -> com.lucent.app.i18n.S.ccRestoreTaskFromTrash(title)
             else -> com.lucent.app.i18n.S.ccRunGeneric(name)
         }
     }
@@ -286,6 +297,14 @@ object AppTools {
             )
         ),
         ToolDefinition(
+            name = "set_note_checklist_mode",
+            description = "Switch a NOTE between checklist mode and plain-text mode, matched by its title — the same toggle the note editor has. Nothing is lost either way: the body text and the checklist items are both kept on the note, and switching back brings the other one up.",
+            params = listOf(
+                ToolParam("note_title", "string", "The title (or part of it) of the note"),
+                ToolParam("checklist", "boolean", "true to show the note as a checklist, false to show its plain-text body")
+            )
+        ),
+        ToolDefinition(
             name = "set_note_attachment",
             description = "Add or replace a text-file attachment on a NOTE (matched by title). If a file with the same name already exists it is overwritten, so this both adds and modifies attachments.",
             params = listOf(
@@ -304,10 +323,25 @@ object AppTools {
         ),
         ToolDefinition(
             name = "attach_upload_to_note",
-            description = "Attach the file the user just UPLOADED in this chat message (a photo, image, or document) onto a NOTE, matched by title. Use this whenever the user uploads a file and wants it saved on a note. This is the only way to attach an uploaded file; set_note_attachment cannot (it only writes text).",
+            description = "Attach the file the user UPLOADED in this chat (a photo, image, or document) onto a NOTE, matched by title. Acts on their most recent upload in this conversation, so it also works when the file was sent a few messages earlier. Use this whenever the user uploads a file and wants it saved on a note. This is the only way to attach an uploaded file; set_note_attachment cannot (it only writes text).",
             params = listOf(
                 ToolParam("note_title", "string", "The title (or part of it) of the note to attach the uploaded file to"),
                 ToolParam("file_name", "string", "Optional name to save the file as; leave out to keep the uploaded file's own name", required = false)
+            )
+        ),
+        // ---- Note version history: every edit saves the outgoing text, and the user can browse
+        // and restore those versions on the note's History screen — so the assistant can too. ----
+        ToolDefinition(
+            name = "list_note_versions",
+            description = "List a NOTE's saved history versions (matched by its title), newest first: each saved version's time, title, and a short preview, numbered from 1 for the most recently saved. Every edit records the previous text automatically, so this is how you see what a note used to say — call it before restore_note_version.",
+            params = listOf(ToolParam("title", "string", "The title (or part of it) of the note"))
+        ),
+        ToolDefinition(
+            name = "restore_note_version",
+            description = "Restore a NOTE (matched by its title) to one of its saved history versions — pass the version number from list_note_versions (1 = the most recently saved). The note's current text is recorded to history first, so a restore is itself undoable. Call list_note_versions first so you restore the right one.",
+            params = listOf(
+                ToolParam("title", "string", "The title (or part of it) of the note"),
+                ToolParam("version", "number", "The version number from list_note_versions (1 = most recent)")
             )
         ),
 
@@ -442,14 +476,43 @@ object AppTools {
         ),
         ToolDefinition(
             name = "attach_upload_to_task",
-            description = "Attach the file the user just UPLOADED in this chat message (a photo, image, or document) onto a TASK, matched by title. Use this whenever the user uploads a file and wants it saved on a task. This is the only way to attach an uploaded file; set_task_attachment cannot (it only writes text).",
+            description = "Attach the file the user UPLOADED in this chat (a photo, image, or document) onto a TASK, matched by title. Acts on their most recent upload in this conversation, so it also works when the file was sent a few messages earlier. Use this whenever the user uploads a file and wants it saved on a task. This is the only way to attach an uploaded file; set_task_attachment cannot (it only writes text).",
             params = listOf(
                 ToolParam("task_title", "string", "The title (or part of it) of the task to attach the uploaded file to"),
                 ToolParam("file_name", "string", "Optional name to save the file as; leave out to keep the uploaded file's own name", required = false)
             )
         ),
 
+        // ---- Trash: the user can see and restore deleted items on the Trash screens, so the
+        // assistant can too — but ONLY list and restore. It still cannot read, edit, or attach
+        // to a trashed row, and it cannot delete anything permanently: restoring is the one safe
+        // direction, and everything destructive stays behind the user's own hands. ----
+        ToolDefinition(
+            name = "list_trash",
+            description = "List what's currently in the Trash: recently deleted notes and/or tasks, with when each was deleted. Deleted items stay there for 30 days before they're removed for good. Use this to find something the user deleted and wants back, then bring it back with restore_note_from_trash or restore_task_from_trash.",
+            params = listOf(ToolParam("type", "string", "What to list: notes, tasks, or both. Defaults to both.", required = false))
+        ),
+        ToolDefinition(
+            name = "restore_note_from_trash",
+            description = "Bring a deleted NOTE back out of the Trash, matched by its title. It returns to wherever it lived before — the notes page, or the Archive screen if it was archived. Call list_trash first to see what's there.",
+            params = listOf(ToolParam("title", "string", "The title (or part of it) of the trashed note to restore"))
+        ),
+        ToolDefinition(
+            name = "restore_task_from_trash",
+            description = "Bring a deleted TASK back out of the Trash, matched by its title. Its reminder is re-armed if it still has a future due time. Call list_trash first to see what's there.",
+            params = listOf(ToolParam("title", "string", "The title (or part of it) of the trashed task to restore"))
+        ),
+
         // ---- Retrieval ----
+        ToolDefinition(
+            name = "read_attachment",
+            description = "Read ONE attachment by name from a note or task, without pulling in the rest of the item. Text files come back as text; an image is shown to you directly so you can look at it. Use it when the person asks about a specific file whose name you know (or have just listed); use read_note/read_task instead when you also need the item's own contents.",
+            params = listOf(
+                ToolParam("item_type", "string", "Where the attachment lives: note or task. Leave out to search both.", required = false),
+                ToolParam("title", "string", "The title (or part of it) of the note or task"),
+                ToolParam("file_name", "string", "The file name (or part of it) of the attachment to read")
+            )
+        ),
         ToolDefinition(
             name = "search_items",
             description = "Search the user's notes and/or tasks and get back only the matching ones. Prefer this over list_notes/list_tasks when the user has a lot of them, or when you're looking for something specific. Supports plain words, \"exact phrases\", and filters: tag:work, is:pinned, is:checklist, is:archived, is:done, is:overdue, has:attachment, has:due, has:reminder, has:subtasks, priority:high, due:today (or tomorrow / week / overdue). Everything you give must match.",
@@ -496,6 +559,17 @@ object AppTools {
 
     private suspend fun activeTasks(db: AppDatabase): List<Task> =
         db.taskDao().getAllOnce().filter { it.trashedAt == null }
+
+    /**
+     * The rows currently in the Trash. Only list_trash and the two restore tools may look here:
+     * everything else stays scoped to the active rows above, so the assistant can restore what the
+     * user can see on the Trash screens but can never quietly work on a row while it's "deleted".
+     */
+    private suspend fun trashedNotes(db: AppDatabase): List<Note> =
+        db.noteDao().getAllOnce().filter { it.trashedAt != null }
+
+    private suspend fun trashedTasks(db: AppDatabase): List<Task> =
+        db.taskDao().getAllOnce().filter { it.trashedAt != null }
 
     private fun matchNote(notes: List<Note>, query: String): Note? =
         notes.firstOrNull { it.title.contains(query, ignoreCase = true) }
@@ -578,7 +652,7 @@ object AppTools {
         onReady: suspend (Attachment) -> ToolExecResult
     ): ToolExecResult {
         if (uploadData.isNullOrBlank()) {
-            return ToolExecResult("There's no uploaded file on this message. Ask the user to attach the file in the chat box, then try again.", success = false)
+            return ToolExecResult("There's no uploaded file in this conversation yet. Ask the user to attach the file in the chat box, then try again.", success = false)
         }
         val bytes = try {
             android.util.Base64.decode(uploadData, android.util.Base64.DEFAULT)
@@ -860,6 +934,28 @@ object AppTools {
                 }
             }
 
+            "set_note_checklist_mode" -> {
+                val titleQuery = args.firstString("note_title", "title")
+                val match = matchNote(activeNotes(db), titleQuery)
+                if (match == null) {
+                    ToolExecResult("No note found matching \"$titleQuery\".", success = false)
+                } else {
+                    val toChecklist = args.optBoolean("checklist", !match.isChecklist)
+                    if (toChecklist == match.isChecklist) {
+                        ToolExecResult("Note \"${match.title}\" is already in ${if (toChecklist) "checklist" else "plain-text"} mode.")
+                    } else {
+                        // The same single-field flip the editor's own mode toggle makes: the body
+                        // and the checklist are BOTH kept on the row, so switching is lossless in
+                        // either direction — exactly the guarantee the composer gives the user.
+                        db.noteDao().update(match.copy(isChecklist = toChecklist))
+                        ToolExecResult(
+                            if (toChecklist) "Note \"${match.title}\" now shows as a checklist. Its body text is kept and comes back if it's switched to plain text again."
+                            else "Note \"${match.title}\" now shows its plain-text body. Its checklist items are kept and come back if it's switched to checklist mode again."
+                        )
+                    }
+                }
+            }
+
             "set_note_attachment" -> {
                 val titleQuery = args.firstString("note_title", "title")
                 val fileName = args.optString("file_name", "note.txt")
@@ -918,6 +1014,70 @@ object AppTools {
                         val list = Attachments.upsert(appContext, Attachments.parse(match.attachments), att)
                         db.noteDao().update(match.copy(attachments = Attachments.serialize(list), updatedAt = System.currentTimeMillis()))
                         ToolExecResult("Attached \"${att.name}\" to note \"${match.title}\".")
+                    }
+                }
+            }
+
+            "list_note_versions" -> {
+                val titleQuery = args.optString("title", "")
+                val match = matchNote(activeNotes(db), titleQuery)
+                if (match == null) {
+                    ToolExecResult("No note found matching \"$titleQuery\".", success = false)
+                } else {
+                    val versions = db.noteVersionDao().getForNoteOnce(match.id)
+                    if (versions.isEmpty()) {
+                        ToolExecResult("Note \"${match.title}\" has no saved history versions yet — a version is captured the first time it's edited.")
+                    } else {
+                        val sb = StringBuilder("Saved versions of note \"${match.title}\" (1 = most recent):\n")
+                        versions.forEachIndexed { i, v ->
+                            val preview = (if (v.isChecklist) Checklist.parse(v.checklist).joinToString("; ") { it.text } else v.body)
+                                .replace('\n', ' ').trim().take(80)
+                            sb.append(i + 1).append(". [").append(DueParsing.format(v.savedAt)).append("] \"").append(v.title).append("\"")
+                            if (preview.isNotBlank()) sb.append(" — ").append(preview)
+                            sb.append("\n")
+                        }
+                        ToolExecResult(sb.toString().trim())
+                    }
+                }
+            }
+
+            "restore_note_version" -> {
+                val titleQuery = args.optString("title", "")
+                val versionIndex = args.optInt("version", 0)
+                val match = matchNote(activeNotes(db), titleQuery)
+                if (match == null) {
+                    ToolExecResult("No note found matching \"$titleQuery\".", success = false)
+                } else {
+                    val versions = db.noteVersionDao().getForNoteOnce(match.id)
+                    val version = versions.getOrNull(versionIndex - 1)
+                    if (version == null) {
+                        ToolExecResult(
+                            if (versions.isEmpty()) "Note \"${match.title}\" has no saved history versions to restore."
+                            else "Note \"${match.title}\" has ${versions.size} saved version(s); $versionIndex isn't one of them. Call list_note_versions to see the numbers.",
+                            success = false
+                        )
+                    } else {
+                        // Exactly the History screen's restore: re-read the LIVE row (it may have
+                        // changed since the match above), apply the version, and record the outgoing
+                        // text as a new revision FIRST — so a restore is itself undoable, the same
+                        // guarantee the user gets doing it by hand.
+                        val current = db.noteDao().getByIdOnce(match.id)
+                        if (current == null) {
+                            ToolExecResult("Note \"${match.title}\" disappeared before it could be restored.", success = false)
+                        } else {
+                            val restored = NoteHistory.applyTo(current, version)
+                            NoteHistory.recordIfChanged(
+                                db = db,
+                                existing = current,
+                                newTitle = restored.title,
+                                newBody = restored.body,
+                                newTags = restored.tags,
+                                newIsChecklist = restored.isChecklist,
+                                newChecklist = restored.checklist
+                            )
+                            db.noteDao().update(restored)
+                            ToolExecResult("Restored note \"${restored.title}\" to its version from ${DueParsing.format(version.savedAt)}. What it said just before the restore was saved to history too, so this can be undone.")
+                        }
                     }
                 }
             }
@@ -1309,7 +1469,101 @@ object AppTools {
                 }
             }
 
+            // ================================ TRASH =================================
+            // The Trash screens let the user see and restore what they deleted, so the assistant
+            // gets the same two abilities — and ONLY those two. Trashed rows still can't be read,
+            // edited, attached to, or purged through here: restoring is the one safe direction.
+
+            "list_trash" -> {
+                val type = args.optString("type", "both").trim().lowercase()
+                val wantNotes = type != "tasks"
+                val wantTasks = type != "notes"
+                val notes = if (wantNotes) trashedNotes(db) else emptyList()
+                val tasks = if (wantTasks) trashedTasks(db) else emptyList()
+                if (notes.isEmpty() && tasks.isEmpty()) {
+                    ToolExecResult("The Trash is empty.")
+                } else {
+                    val sb = StringBuilder()
+                    if (notes.isNotEmpty()) {
+                        sb.append("Trashed notes (${notes.size}):\n")
+                        notes.forEach { n ->
+                            sb.append("- \"").append(n.title.ifBlank { "Untitled" }).append("\"")
+                            n.trashedAt?.let { sb.append(" (deleted ").append(DueParsing.format(it)).append(")") }
+                            sb.append("\n")
+                        }
+                    }
+                    if (tasks.isNotEmpty()) {
+                        if (sb.isNotEmpty()) sb.append("\n")
+                        sb.append("Trashed tasks (${tasks.size}):\n")
+                        tasks.forEach { t ->
+                            sb.append("- \"").append(t.title.ifBlank { "Untitled" }).append("\"")
+                            t.trashedAt?.let { sb.append(" (deleted ").append(DueParsing.format(it)).append(")") }
+                            sb.append("\n")
+                        }
+                    }
+                    sb.append("\nItems are removed for good after 30 days in the Trash.")
+                    ToolExecResult(sb.toString().trim())
+                }
+            }
+
+            "restore_note_from_trash" -> {
+                val titleQuery = args.optString("title", "")
+                val match = matchNote(trashedNotes(db), titleQuery)
+                if (match == null) {
+                    ToolExecResult("No trashed note found matching \"$titleQuery\". Call list_trash to see what's in the Trash.", success = false)
+                } else {
+                    // The same untrash the Trash screen's Restore button runs, so both paths land
+                    // the note back in exactly the same place.
+                    TaskActions.untrashNote(db, match)
+                    ToolExecResult(
+                        if (match.archived) "Restored note \"${match.title}\" from the Trash — it's back on the Archive screen."
+                        else "Restored note \"${match.title}\" from the Trash — it's back on the notes page."
+                    )
+                }
+            }
+
+            "restore_task_from_trash" -> {
+                val titleQuery = args.optString("title", "")
+                val match = matchTask(trashedTasks(db), titleQuery)
+                if (match == null) {
+                    ToolExecResult("No trashed task found matching \"$titleQuery\". Call list_trash to see what's in the Trash.", success = false)
+                } else {
+                    // Routed through TaskActions.untrash, exactly like the Trash screen's Restore
+                    // button — which also re-arms the task's reminder if it still has a future due.
+                    TaskActions.untrash(appContext, db, match)
+                    ToolExecResult("Restored task \"${match.title}\" from the Trash.")
+                }
+            }
+
             // ============================== RETRIEVAL ==============================
+
+            "read_attachment" -> {
+                val itemType = args.optString("item_type", "").trim().lowercase()
+                val titleQuery = args.firstString("title", "note_title", "task_title")
+                val fileName = args.firstString("file_name", "name")
+                // Resolve the owning item first. An explicit item_type wins; without one, try notes
+                // then tasks — the same title tolerance every other tool applies.
+                val note = if (itemType != "task") matchNote(activeNotes(db), titleQuery) else null
+                val task = if (note == null && itemType != "note") matchTask(activeTasks(db), titleQuery) else null
+                if (note == null && task == null) {
+                    ToolExecResult("No note or task found matching \"$titleQuery\".", success = false)
+                } else {
+                    val ownerKind = if (note != null) "note" else "task"
+                    val ownerTitle = note?.title ?: task!!.title
+                    val attachments = Attachments.parse(note?.attachments ?: task!!.attachments)
+                    val resolved = resolveAttachmentName(attachments, fileName)
+                    val att = attachments.firstOrNull { it.name.equals(resolved, ignoreCase = true) }
+                    if (att == null) {
+                        val names = attachments.joinToString(", ") { it.name }.ifBlank { "none" }
+                        ToolExecResult("No attachment named \"$fileName\" on $ownerKind \"$ownerTitle\". It currently has: $names.", success = false)
+                    } else {
+                        ToolExecResult(
+                            "Attachment on $ownerKind \"$ownerTitle\":\n" + describeAttachment(appContext, att),
+                            imagesFrom(appContext, listOf(att))
+                        )
+                    }
+                }
+            }
 
             "search_items" -> {
                 val raw = args.firstString("query", "q", "search")
