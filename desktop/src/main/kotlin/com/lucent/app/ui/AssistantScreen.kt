@@ -1090,6 +1090,21 @@ fun AssistantScreen(active: Boolean = true) {
             )
         }
 
+        // Deterministic tool-permission notice (tool-permission feedback fix): while the
+        // on-device model is answering WITHOUT tool permission, say so right where the user is
+        // typing. The system prompt also tells the model to explain this, but a very small local
+        // model can't be relied on to follow it — the failure mode is a bare "your task cannot
+        // be completed" that never mentions the real cause. This line is the guarantee that the
+        // cause (and the exact setting that fixes it) is always visible, whatever the model says.
+        if (localModelEnabled && !localToolsEnabled) {
+            Text(
+                com.lucent.app.i18n.S.localToolsOffHint,
+                color = onGradientMuted,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+            )
+        }
         if (pendingAttachment != null) {
             Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.AttachFile, contentDescription = null, tint = onGradientMuted)

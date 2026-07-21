@@ -76,15 +76,18 @@ object AppReady {
  *
  * ### The cat
  *
- * Redrawn from a reference picture: a marshmallow-white kitten with a huge soft head, two little
- * round ear bumps, dot eyes, airbrushed pink cheeks, a wavy pink mouth, pink whiskers, a
+ * Redrawn from a reference picture: a marshmallow-white kitten with a huge soft head, two
+ * rounded-triangle ears (pointed like a real cat's, with softly rounded tips — never circles),
+ * dot eyes, airbrushed pink cheeks, a wavy pink mouth, pink whiskers, a
  * butter-yellow tummy, a curled tail — and a plump blue fish napping on its head, which bobs
  * gently while the cat is solid. Its paws are NOT floating circles: they are slim vertical mitts —
  * rounded "stick" cross-sections, taller than they are wide — held in front of a wide torso and
- * overlapping it, so cat-plus-paws reads as one connected plush shape. The key proportions (body
- * 0.87 of head width, cheeks the widest point) are measured off the picture; the mitts are
- * deliberately slimmer than the reference's round paws (~0.24 of the body width) to open up the
- * chest and let the tummy patch show.
+ * overlapping it, so cat-plus-paws reads as one connected plush shape. Each mitt's FREE TOP CAP is
+ * painted as the actual paw — a soft pink glow with a palm pad and three toe beans — so top (hand)
+ * and bottom (shoulder, planted on the torso) are visually unmistakable while it waves. The key
+ * proportions (body 0.87 of head width, cheeks the widest point) are measured off the picture; the
+ * mitts are deliberately slimmer than the reference's round paws (~0.24 of the body width) to open
+ * up the chest and let the tummy patch show.
  *
  * ### The animation
  *
@@ -293,6 +296,8 @@ private val Fur = Color(0xFFFFFDFA)        // marshmallow white, barely warm
 private val Line = Color(0xFF8C7276)       // warm grey-brown crayon outline
 private val EyeColor = Color(0xFF4E3B40)   // dot eyes
 private val BlushPink = Color(0xFFF6B8CE)  // airbrushed pink wash (cheeks, ears, paw tips)
+private val PawPadPink = Color(0xFFF2A2C0) // paw pads (palm pad + toe beans): a touch deeper than
+                                           // the blush so the beans read crisply on top of the glow
 private val WhiskerPink = Color(0xFFF0A6BE)
 private val MouthPink = Color(0xFFEE8FB0)  // the wavy little mouth
 private val BellyCream = Color(0xFFF7EFC8) // butter-yellow tummy patch
@@ -303,14 +308,16 @@ private val FishEye = Color(0xFF4A7BAA)
 /**
  * Draws the Lucent cat at the origin, in a space roughly 780 units tall.
  *
- * Faithful to the reference picture: a marshmallow-white kitten whose huge soft head (a rounded
- * square unioned with two little round ear bumps, so head-plus-ears is ONE continuous outline)
- * carries a napping blue fish; dot eyes, airbrushed cheeks, a wavy pink mouth, pink whiskers, a
+ * Faithful to the reference picture, with real CAT ears: a marshmallow-white kitten whose huge soft
+ * head (a rounded square unioned with two rounded-TRIANGLE ears — pointed, softly rounded at the
+ * tip, never circles — so head-plus-ears is ONE continuous outline) carries a napping blue fish;
+ * dot eyes, airbrushed cheeks, a wavy pink mouth, pink whiskers, a
  * butter tummy and a curled tail below. The paws are slim vertical mitts — outlined rounded
  * rectangles with fully rounded end caps, like little stick cross-sections — overlapping the torso
  * and connected to the body; they wave by rotating about shoulder pivots buried deep inside the
- * body, each mitt tilting with its arm, so however far they swing the join never opens. All of it
- * is plain Canvas primitives
+ * body, each mitt tilting with its arm, so however far they swing the join never opens. Each mitt's
+ * free TOP cap carries the paw markings (a pink glow, a palm pad, three toe beans), so which end is
+ * the hand is never in doubt. All of it is plain Canvas primitives
  * (round rects, ovals, arcs, lines and a few bezier paths united with [PathOperation.Union]): no
  * image asset, scales to any screen, and can be morphed arbitrarily, which is the entire trick in
  * the "become glass" phase.
@@ -337,14 +344,16 @@ private fun DrawScope.drawCat(
 
     // ---- Silhouette geometry ----
 
-    // Head: one continuous outline = big rounded square ∪ two round ear bumps ∪ two cheek
+    // Head: one continuous outline = big rounded square ∪ two rounded-TRIANGLE ears ∪ two cheek
     // bulges. The union keeps the crayon line unbroken everywhere, and the cheeks make the head
     // widest at its lower half — measured straight off the reference, where the face melts into
-    // the shoulders with barely a pinch.
+    // the shoulders with barely a pinch. The ears are proper cat ears — pointed triangles with a
+    // softly rounded tip (see [earPath]), never circles — with their bases buried inside the head
+    // so the union melts them seamlessly into the crown.
     val head = Path().apply {
         addRoundRect(RoundRect(Rect(-130f, -152f, 130f, 28f), CornerRadius(82f, 82f)))
     }
-        .union(circlePath(-90f, -138f, 36f)).union(circlePath(90f, -138f, 36f))
+        .union(earPath(-1f)).union(earPath(1f))
         .union(circlePath(-98f, -4f, 45f)).union(circlePath(98f, -4f, 45f))
 
     // Body: a wide rounded slab — almost as wide as the head (0.87 of it, like the reference) —
@@ -405,11 +414,17 @@ private fun DrawScope.drawCat(
         drawPath(bellyPath, BellyCream.copy(alpha = solid))
         drawPath(bellyPath, Line.copy(alpha = solid), style = Stroke(width = 4f))
 
-        // Paws over the body: slim outlined vertical mitts, each with a pink wash near its lower
-        // rounded end. Being drawn after the body, the paw hides the stretch of body outline it
-        // overlaps — which is precisely how the reference reads. Each mitt rotates about its own
-        // bottom cap — the fixed contact point on the torso — so it swings like a little
-        // metronome while its base never leaves the body.
+        // Paws over the body: slim outlined vertical mitts. Being drawn after the body, the paw
+        // hides the stretch of body outline it overlaps — which is precisely how the reference
+        // reads. Each mitt rotates about its own bottom cap — the fixed contact point on the
+        // torso — so it swings like a little metronome while its base never leaves the body.
+        //
+        // The paw markings live on the FREE TOP CAP (the "hand" that waves), not on the planted
+        // bottom cap: the pink glow used to sit at the bottom, which made the two ends of the arm
+        // indistinguishable — the shoulder read as the hand. So the glow moved up, and on top of
+        // it sits an actual cat paw: one palm pad plus three toe beans, drawn inside the same
+        // rotation so they swing with the mitt. All of it fades with [solid], like every other
+        // painted detail.
         for (i in 0..1) {
             val side = if (i == 0) -1f else 1f
             val c = if (i == 0) pawL else pawR
@@ -418,7 +433,14 @@ private fun DrawScope.drawCat(
                 val topLeft = Offset(c.x - pawHalfWidth, c.y - pawHalfHeight)
                 drawRoundRect(Fur.copy(alpha = solid), topLeft, pawSize, pawCorner)
                 drawRoundRect(Line.copy(alpha = solid), topLeft, pawSize, pawCorner, style = Stroke(width = 7f))
-                blush(Offset(c.x + side * 3f, c.y + 28f), 30f, 0.53f * solid)
+                // The soft pink glow, relocated from the bottom cap to sit behind the pads on top.
+                blush(Offset(c.x, c.y - 38f), 30f, 0.53f * solid)
+                // Palm pad: a plump little oval centred on the top cap.
+                drawOval(PawPadPink.copy(alpha = solid), Offset(c.x - 11f, c.y - 38f), Size(22f, 16f))
+                // Three toe beans arched above the palm pad, the middle one sitting highest.
+                drawOval(PawPadPink.copy(alpha = solid), Offset(c.x - 17.25f, c.y - 50.5f), Size(8.5f, 10f))
+                drawOval(PawPadPink.copy(alpha = solid), Offset(c.x - 4.25f, c.y - 54.5f), Size(8.5f, 10f))
+                drawOval(PawPadPink.copy(alpha = solid), Offset(c.x + 8.75f, c.y - 50.5f), Size(8.5f, 10f))
             }
         }
 
@@ -427,7 +449,8 @@ private fun DrawScope.drawCat(
         drawPath(head, Line.copy(alpha = solid), style = Stroke(width = 7f))
         for (i in 0..1) {
             val side = if (i == 0) -1f else 1f
-            blush(Offset(side * 90f, -140f), 34f, 0.49f * solid)
+            // Ear-tip pink, raised to sit inside the new triangular ear rather than the old round bump.
+            blush(Offset(side * 92f, -152f), 30f, 0.49f * solid)
             blush(Offset(side * 100f, -6f), 54f, 0.65f * solid)
             blush(Offset(side * 126f, -64f), 38f, 0.33f * solid)
         }
@@ -554,6 +577,26 @@ private fun fishPetal(fy: Float, sg: Float): Path = Path().apply {
 
 private fun circlePath(cx: Float, cy: Float, r: Float): Path =
     Path().apply { addOval(Rect(cx - r, cy - r, cx + r, cy + r)) }
+
+/**
+ * One rounded-triangle cat ear, unioned into the head; [sg] = -1 for the left ear, +1 for the
+ * right (the shape is its mirror image).
+ *
+ * A cat's ear is a pointed triangle, not a circle, so this replaces the old round ear bumps. The
+ * two base corners sit INSIDE the head silhouette (x·sg 56 → 118, following the crown's slope), so
+ * the union melts the base seamlessly into the head and only the pointed part shows. The apex is
+ * at (sg·100, -192) — leaning slightly outward, the way real ears do — and the tip is ROUNDED, not
+ * sharp: both straight edges stop a little short of the apex and a small cubic (the quadratic
+ * through the apex, written as the equivalent cubic) arcs between them, which is what makes this a
+ * rounded-corner triangle rather than a spike.
+ */
+private fun earPath(sg: Float): Path = Path().apply {
+    moveTo(sg * 56f, -138f)                                              // inner base, buried in the head
+    lineTo(sg * 90.3f, -180.1f)                                          // inner edge, up toward the tip
+    cubicTo(sg * 96.8f, -188f, sg * 101.3f, -185.4f, sg * 104f, -172.2f) // the rounded tip itself
+    lineTo(sg * 118f, -102f)                                             // outer edge, down the crown
+    close()                                                              // base edge, hidden inside the head
+}
 
 /** Silhouettes are built by uniting simple shapes, which is what keeps their outlines continuous. */
 private fun Path.union(other: Path): Path = Path.combine(PathOperation.Union, this, other)

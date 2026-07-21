@@ -551,6 +551,12 @@ object AssistantController {
                 val systemPrompt = buildSystemPrompt(name, style, memoryTier, webSearchEnabled, crossMemory)
                 val tools = AppTools.definitions(includeWebSearch = webSearchEnabled)
 
+                // The upload the attach_upload_* tools may store this turn: the file on the
+                // message just sent, or — when it has none — the user's most recent earlier
+                // upload in this conversation (see resolveUpload).
+                val (uploadMime, uploadData, uploadName) =
+                    resolveUpload(db, conversationId, attachmentMime, attachmentData, attachmentName)
+
                 var finalReply: RawModelReply? = null
                 var lastToolResults: List<ToolExecResult> = emptyList()
                 var errored = false
@@ -627,7 +633,7 @@ object AssistantController {
                         thinking = true
                         val r = AppTools.execute(
                             appContext, db, call.name, confirmed.argumentsJson,
-                            attachmentMime, attachmentData, attachmentName
+                            uploadMime, uploadData, uploadName
                         )
                         executed[sig] = r
                         results.add(r)
@@ -851,6 +857,21 @@ object AssistantController {
         messages.add("system" to buildLocalSystemPrompt(tools))
         messages.addAll(turns)
 
+        // The upload the attach_upload_* tools may store this turn. The just-sent message is
+        // already persisted, so the newest user upload in this conversation IS that message's
+        // file when it has one, and otherwise the most recent earlier upload (see resolveUpload).
+        // A text-only local model can't look inside the file, but attaching it doesn't need to —
+        // the bytes ride outside the model — so the transcript only has to say the file exists.
+        val (uploadMime, uploadData, uploadName) = resolveUpload(db, conversationId, null, null, null)
+        if (!uploadData.isNullOrBlank()) {
+            messages.add(
+                "system" to ("The user has an uploaded file in this conversation: \"" +
+                    (uploadName ?: "file") + "\". You cannot see inside it, but you CAN save it: " +
+                    "call attach_upload_to_note or attach_upload_to_task to attach that exact " +
+                    "file to a note or task when asked.")
+            )
+        }
+
         // Per-turn dedup so the exact same call can't run twice, and the results gathered so far so
         // an empty final reply can still be turned into an honest summary of what was done.
         val executed = HashMap<String, ToolExecResult>()
@@ -904,7 +925,10 @@ object AssistantController {
                 }
 
                 thinking = true
-                val r = AppTools.execute(ctx, db, call.name, confirmed.argumentsJson)
+                val r = AppTools.execute(
+                    ctx, db, call.name, confirmed.argumentsJson,
+                    uploadMime, uploadData, uploadName
+                )
                 executed[sig] = r
                 r
             }
@@ -959,9 +983,9 @@ object AssistantController {
                     "You are a helpful assistant living inside Lucent, a personal notes and tasks app. " +
                     "Always reply in the same language the user writes in. Be concise, warm, and clear. " +
                     "Write plain conversational text only — never markdown, asterisks, bullet points, or headings.\n\n" +
-                    // ---- Capability honesty (task 6) ----
+                    // ---- Capability honesty (task 6) + name the reason (tool-permission fix) ----
                     //
-                    // This paragraph is the entire fix for "the assistant says it created the task
+                    // This paragraph is the fix for "the assistant says it created the task
                     // and nothing happened". Tools are OFF on this path, and the prompt used to be
                     // silent about it — so the model, which has no way to observe its own tool
                     // access, answered the only way a helpful assistant can when asked to do
@@ -971,20 +995,40 @@ object AssistantController {
                     // Stated as a hard capability limit rather than a style preference, because a
                     // soft phrasing ("you may not be able to…") leaves room for the model to decide
                     // it probably can.
-                    "IMPORTANT — WHAT YOU CANNOT DO RIGHT NOW. You have NO tools and NO ability to " +
-                    "change anything in this app in this conversation. You cannot create, read, " +
-                    "edit, complete, or delete notes or tasks, you cannot attach files, and you " +
-                    "cannot see the user's existing notes or tasks at all. You also have NO internet " +
-                    "access, so you cannot look anything up or fetch anything current.\n\n" +
+                    //
+                    // The second half of the fix is the OTHER failure this mode produced: a bare
+                    // "I can't do that" — or worse, "your task cannot be completed" — with no
+                    // reason given, which reads as a malfunction and tells the user nothing about
+                    // the one setting that would fix it. So the prompt now states the cause (the
+                    // "Allow tools" switch is off) and ORDERS the model to pass that reason on,
+                    // with the exact Settings path. A very small model may still ignore even
+                    // this, which is why the Assistant screen ALSO shows a deterministic hint
+                    // (S.localToolsOffHint) whenever local mode runs without tool permission:
+                    // the user learns the cause from the UI even if the model never says it.
+                    "IMPORTANT — WHAT YOU CANNOT DO RIGHT NOW, AND WHY. You have NO tools and NO " +
+                    "ability to change anything in this app in this conversation. You cannot " +
+                    "create, read, edit, complete, or delete notes or tasks, you cannot attach " +
+                    "files, and you cannot see the user's existing notes or tasks at all. You also " +
+                    "have NO internet access, so you cannot look anything up or fetch anything " +
+                    "current. The ONLY reason for all of this is a setting: the user has not " +
+                    "granted you tool permission — the \"Allow tools\" switch under Settings > " +
+                    "Assistant > Local model is OFF. It is a setting, not a flaw in their request; " +
+                    "their requests are not impossible.\n\n" +
                     "Because of that, you must NEVER say or imply that you have created, added, " +
                     "saved, changed, completed, deleted, or found anything. Never say \"done\", " +
                     "\"added it\", \"I've made that note\", or anything of that shape. That would be " +
                     "false, and the user would go looking for something that does not exist.\n\n" +
-                    "If they ask you to create or change a note or task, say plainly that you cannot " +
-                    "do it in this mode, and that they can switch it on in Settings > Assistant > " +
-                    "Local model > Allow tools, or add the item themselves on the Notes or Tasks " +
-                    "tab. You can still help fully in words — draft the wording, think it through, " +
-                    "talk it over — and offering that is far more useful than an apology."
+                    "If they ask you to create, change, find, or do anything with a note or task " +
+                    "(for example \"add a task for tomorrow morning\"), you MUST give them the real " +
+                    "reason, in their own language: you can't act right now because tool " +
+                    "permission is turned off, and they can enable it under Settings > Assistant > " +
+                    "Local model > Allow tools (or add the item themselves on the Notes or Tasks " +
+                    "tab). NEVER answer with only a bare refusal like \"I can't do that\" or " +
+                    "\"your task cannot be completed\" — a refusal that hides the reason reads as " +
+                    "a malfunction and leaves them stuck, when one sentence about the setting " +
+                    "fixes it. If they ask WHY you can't, that setting IS the answer. You can " +
+                    "still help fully in words — draft the wording, think it through, talk it " +
+                    "over — and offering that is far more useful than an apology."
                 )
             )
             addAll(turns)
@@ -1051,7 +1095,10 @@ object AssistantController {
             // same class of failure as a tool-less model inventing a task.
             append("The tools listed below are the ONLY actions available to you. If something is " +
                 "not in that list you cannot do it, and you must say so rather than claiming you " +
-                "did it. In particular you have NO internet access in this mode: you cannot search " +
+                "did it — and say the real reason in the user's language (this assistant doesn't " +
+                "have that ability in this app), never a bare \"I can't\" and never that their " +
+                "request itself is impossible. In particular you have NO internet access in this " +
+                "mode: you cannot search " +
                 "the web, open links, or fetch anything current, so never present a guess as a " +
                 "looked-up fact. Only report an action as done after its \"Result of <tool>:\" line " +
                 "confirms it worked; if a result says it failed, tell the user it failed.\n\n")
@@ -1163,6 +1210,33 @@ object AssistantController {
     }
 
     /**
+     * The upload the attach_upload_* tools should act on this turn: the file attached to the
+     * message being sent right now, or — when that message has none — the user's MOST RECENT
+     * upload earlier in this conversation.
+     *
+     * The fallback fixes a very natural two-step flow (task: uploaded files must be attachable):
+     * the person sends a photo ("look at this"), the assistant answers, and only THEN they say
+     * "put it on my Trip note". Before, the tools only ever saw the current message's attachment,
+     * so that second step failed with "there's no uploaded file" even though the file was sitting
+     * right there in the thread. Falling back to the newest user upload matches what "the file I
+     * uploaded" plainly means in a conversation. It also gives the LOCAL tool path uploads at all
+     * — that path used to pass none, so the on-device assistant could never attach anything.
+     */
+    private suspend fun resolveUpload(
+        db: AppDatabase,
+        conversationId: Long,
+        mime: String?,
+        data: String?,
+        name: String?
+    ): Triple<String?, String?, String?> {
+        if (!data.isNullOrBlank()) return Triple(mime, data, name)
+        val previous = db.chatDao().getForConversationOnce(conversationId)
+            .lastOrNull { it.role == "user" && !it.attachmentData.isNullOrBlank() }
+            ?: return Triple(null, null, null)
+        return Triple(previous.attachmentMime, previous.attachmentData, previous.attachmentName)
+    }
+
+    /**
      * For the HIGH tier, a compact digest of the most recent messages from the user's *other*
      * conversations, so the assistant carries memory across chats. Bounded by
      * [MemoryTier.HIGH_CROSS_MESSAGE_BUDGET] and truncated per message, so global memory can never
@@ -1235,6 +1309,7 @@ object AssistantController {
         name.startsWith("delete_") -> com.lucent.app.i18n.S.confirmMoveTrash
         name.startsWith("create_") -> com.lucent.app.i18n.S.confirmCreate
         name.startsWith("complete_") -> com.lucent.app.i18n.S.confirmMarkDone
+        name.startsWith("restore_") -> com.lucent.app.i18n.S.confirmRestore
         name.contains("remove") -> com.lucent.app.i18n.S.confirmRemove
         else -> com.lucent.app.i18n.S.confirmGeneric
     }
@@ -1552,8 +1627,9 @@ object AssistantController {
             append("also be a checklist instead of a body. Use the note tools (create_note, list_notes, ")
             append("read_note, update_note, delete_note, pin_note, archive_note, set_note_color, ")
             append("add_note_checklist_item, set_note_checklist_item_done, edit_note_checklist_item, ")
-            append("remove_note_checklist_item, set_note_attachment, ")
-            append("remove_note_attachment, attach_upload_to_note) for anything they're writing down, ")
+            append("remove_note_checklist_item, set_note_checklist_mode, set_note_attachment, ")
+            append("remove_note_attachment, attach_upload_to_note, list_note_versions, ")
+            append("restore_note_version) for anything they're writing down, ")
             append("saving, or remembering. TASKS are actionable to-do items that can be completed: a ")
             append("title, a done/pending state, optional notes/description text, optional file ")
             append("attachments, a priority, an optional due date with an optional repeat schedule and ")
@@ -1565,8 +1641,10 @@ object AssistantController {
             append("need to do, finish, or check off. You can do everything the person can do to their ")
             append("notes and tasks by hand: create, list, read, update, pin, colour, archive, and delete ")
             append("notes; create, list, read, update, complete, reopen, pin, prioritise, schedule, and ")
-            append("delete tasks; work every checklist item by item; and add, change, or remove ")
-            append("attachments on either. ")
+            append("delete tasks; work every checklist item by item; add, change, read, or remove ")
+            append("attachments on either (read_attachment reads one file by name); switch a note ")
+            append("between checklist and plain-text mode; browse and restore a note's edit ")
+            append("history; and list the Trash and restore deleted notes and tasks out of it. ")
 
             // ---- Retrieval ----
             append("When the person has a lot of notes or tasks, prefer search_items over dumping the ")
@@ -1578,11 +1656,20 @@ object AssistantController {
             append("Deleting a note or task moves it to Trash rather than erasing it — the person can ")
             append("restore it themselves for 30 days. So just do it when they ask, and mention the Trash ")
             append("in passing rather than warning them that it's irreversible, because it isn't. ")
+            append("And you can bring things back too: when they deleted something and want it back, ")
+            append("list_trash shows what's in the Trash and restore_note_from_trash / ")
+            append("restore_task_from_trash return it. Restoring is the only thing you can do to a ")
+            append("trashed item — you can never read or edit one in place, and never delete one for ")
+            append("good. ")
 
             // ---- Editing a note is recoverable too ----
             append("Editing a note automatically saves its previous text to that note's version history, ")
             append("which the person can browse and restore from. So you can edit confidently when asked, ")
             append("without hedging about overwriting what was there. ")
+            append("You can work that history yourself too: list_note_versions shows a note's saved ")
+            append("versions (1 = the most recent) and restore_note_version brings one back when they ")
+            append("ask to undo an edit — the text from just before the restore is saved as well, so ")
+            append("even a restore can be undone. ")
 
             // ---- Dates, priorities, recurrence, reminders, checklists ----
             val nowLocal = java.time.ZonedDateTime.now()
@@ -1666,13 +1753,15 @@ object AssistantController {
             append("it worked. If a tool result says it failed, couldn't find the item, or that an ")
             append("attachment is still there after a remove, tell the user plainly that it didn't work and ")
             append("what went wrong, rather than pretending it succeeded. Never invent a confirmation. ")
-                        // ---- Uploaded files ----
+            // ---- Uploaded files ----
             append("When the person UPLOADS a file in the chat and wants it saved onto a note or task ")
             append("(\"attach this to my X note\", \"add this photo to that task\"), call attach_upload_to_note ")
-            append("or attach_upload_to_task with the item's title — that attaches the exact file they just ")
-            append("uploaded. Only that tool can attach an uploaded file; set_note_attachment is for text you ")
-            append("type out, not for their upload. If they ask you to attach an upload but didn't actually ")
-            append("attach a file to their message, tell them to add it in the chat box and try again. ")
+            append("or attach_upload_to_task with the item's title — that attaches their most recent upload ")
+            append("in this conversation, so it works even when the file came with an earlier message. Only ")
+            append("that tool can attach an uploaded file; set_note_attachment is for text you ")
+            append("type out, not for their upload. If they ask you to attach an upload but no file has ")
+            append("been uploaded in this conversation at all, tell them to add it in the chat box and ")
+            append("try again. ")
 
             // ---- Proactive, but never presumptuous (issue 5) ----
             append("Be helpfully proactive about notes and tasks, but never pushy. When the person clearly ")
@@ -1716,6 +1805,15 @@ object AssistantController {
             append("Anything not in that list, you cannot do — and the correct response is to say so, ")
             append("never to describe it as done. Never report a change to the person's notes or tasks ")
             append("that you did not actually make through a tool whose result confirmed success. ")
+            // ---- Refusals must name the real reason (tool-permission feedback fix) ----
+            append("When you do have to decline because a capability isn't available to you, never ")
+            append("leave the person guessing with a bare \"I can't do that\", and never imply their ")
+            append("request itself is impossible — the request is usually fine. Give the actual ")
+            append("reason in one plain sentence: the ability isn't part of this assistant, or the ")
+            append("specific feature that would allow it is currently turned off in this app's ")
+            append("settings. When it IS a setting the person controls — like Web search under ")
+            append("Settings > Assistant > Networking — name that setting so they know exactly ")
+            append("where to turn it on. ")
 
             // ---- Memory scope for this turn (issue 9) ----
             when (tier) {

@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.sp
 import com.lucent.app.i18n.S
 
@@ -54,6 +55,18 @@ import com.lucent.app.i18n.S
  *
  * Actions with nothing meaningfully editable (deleting, pinning, completing) show no field, because
  * for those the decision genuinely is only yes or no.
+ *
+ * ### Only the Cancel button cancels (accidental-dismiss fix)
+ *
+ * This dialog appears on the model's schedule, not the user's — it can pop up right as they are
+ * scrolling the thread or reaching for something else. With the default dialog behaviour, a stray
+ * touch on the scrim (or a reflexive back press) counted as "no" and silently cancelled an action
+ * the user had actually asked for, and they were left waiting for a task that was never going to
+ * appear. So dismissal is disabled entirely: [DialogProperties] turns off outside-tap and
+ * back-press dismissal, and [AlertDialog]'s onDismissRequest is an inert no-op as belt-and-braces
+ * (with both routes off it can no longer fire). The ONLY ways out are the two labelled buttons —
+ * Confirm runs the action, Cancel declines it — so a decision is always a deliberate tap on a
+ * button the user has read, never an accident of where a finger happened to land.
  */
 @Composable
 fun AssistantConfirmationDialog() {
@@ -64,7 +77,14 @@ fun AssistantConfirmationDialog() {
     var draft by remember(confirm) { mutableStateOf(confirm.editValue) }
 
     AlertDialog(
-        onDismissRequest = { AssistantController.resolveConfirmation(false) },
+        // Deliberately inert: scrim taps and back presses are disabled below, so this can't fire —
+        // and keeping it a no-op guarantees that even if it somehow did, an accidental touch could
+        // never count as "cancel". Only the explicit Cancel button declines the action.
+        onDismissRequest = { },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false
+        ),
         title = { Text(confirm.actionTitle) },
         text = {
             Column {
