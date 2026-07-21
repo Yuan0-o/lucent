@@ -40,6 +40,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -338,7 +339,7 @@ private fun BufferedImage.toBitmap(): ImageBitmap {
     val baos = ByteArrayOutputStream()
     javax.imageio.ImageIO.write(this, "png", baos)
     return org.jetbrains.skia.Image.makeFromEncoded(baos.toByteArray())
-        .let { androidx.compose.ui.graphics.toComposeImageBitmap(it) }
+        .toComposeImageBitmap()
 }
 
 /** Paint a freehand red stroke onto [bmp] along [points] (bitmap-space). */
