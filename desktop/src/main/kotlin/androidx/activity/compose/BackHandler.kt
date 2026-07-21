@@ -9,6 +9,7 @@ package androidx.activity.compose
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 
 /** The desktop dispatcher the shell's key handler consults. Last registered enabled entry wins. */
