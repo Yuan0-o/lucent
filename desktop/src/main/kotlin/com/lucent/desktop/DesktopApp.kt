@@ -32,6 +32,7 @@ import com.lucent.app.ui.FluidGlassBackground
 import com.lucent.app.ui.LocalOnGradient
 import com.lucent.app.ui.LocalOnGradientMuted
 import com.lucent.app.ui.LockScreen
+import com.lucent.app.ui.LucentSplash
 import com.lucent.app.ui.LucentFont
 import com.lucent.app.ui.LucentPalette
 import com.lucent.app.ui.PALETTE_CYCLE
@@ -120,6 +121,19 @@ fun DesktopApp(startup: SettingsRepository.StartupPrefs) {
                 }
 
                 ToastOverlay()
+
+                // The launch animation, layered OVER everything (lock screen + shell) so the real
+                // content composes underneath while it plays — same idea as Android's splash. Kept in
+                // plain process state, so it shows once per launch and a recomposition doesn't replay it.
+                var splashDone by remember { mutableStateOf(false) }
+                if (!splashDone) {
+                    LucentSplash(
+                        paletteColors = paletteColors,
+                        backdropColor = backdropColor,
+                        onFinished = { splashDone = true },
+                        backgroundAnimated = backgroundAnimated
+                    )
+                }
             }
         }
     }
