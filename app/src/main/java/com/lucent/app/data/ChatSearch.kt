@@ -57,8 +57,14 @@ object ChatSearch {
      * Score one document against the query. Returns 0 when it doesn't match every term/phrase, and
      * a positive relevance score when it does — higher is better.
      */
-    fun score(rawQuery: String, doc: Doc): Int {
-        val q = parse(rawQuery)
+    fun score(rawQuery: String, doc: Doc): Int = score(parse(rawQuery), doc)
+
+    /**
+     * The parsed-query core of [score]. [rank] parses the query ONCE and calls this per document —
+     * the public overload above used to be called in its place, which re-ran the tokenizing regex
+     * over the query for every conversation in the history on every keystroke.
+     */
+    private fun score(q: ParsedQuery, doc: Doc): Int {
         if (q.isEmpty) return 0
         val title = doc.title.lowercase()
         val content = doc.content.lowercase()
@@ -117,8 +123,9 @@ object ChatSearch {
 
     fun rank(rawQuery: String, docs: List<Doc>): List<Long>? {
         if (rawQuery.isBlank()) return null
+        val q = parse(rawQuery)   // parsed once for the whole pass, not once per conversation
         return docs
-            .mapNotNull { d -> score(rawQuery, d).takeIf { it > 0 }?.let { d.conversationId to it } }
+            .mapNotNull { d -> score(q, d).takeIf { it > 0 }?.let { d.conversationId to it } }
             .sortedByDescending { it.second }
             .map { it.first }
     }

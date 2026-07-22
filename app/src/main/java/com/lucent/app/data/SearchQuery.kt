@@ -77,6 +77,14 @@ data class SearchQuery(
         get() = terms.isEmpty() && phrases.isEmpty() && tags.isEmpty() && flags.isEmpty() &&
             has.isEmpty() && priority == null && due == null && linkTo == null
 
+    /**
+     * `terms + phrases`, materialized once per query instead of once per ranked row. rank() walks
+     * this list for every candidate, and building it inside rank() meant one fresh list allocation
+     * per note/task per keystroke. A `lazy` body property on a data class stays out of
+     * equals/hashCode/copy, so query values compare exactly as before.
+     */
+    private val needles: List<String> by lazy { terms + phrases }
+
     // -----------------------------------------------------------------------------------------
     // Scope
     // -----------------------------------------------------------------------------------------
@@ -168,8 +176,14 @@ data class SearchQuery(
     fun matches(note: Note): Boolean {
         if (isEmpty) return true
 
+        // The checklist JSON is parsed at most once per call — it feeds both the searchable body
+        // text (for checklist-mode notes) and the has:subtasks filter, and was previously parsed
+        // separately for each. Parsed only when one of those consumers actually needs it.
+        val checklist =
+            if (note.isChecklist || "subtasks" in has) Checklist.parse(note.checklist) else emptyList()
+
         // Text: every term and every phrase must appear somewhere in the note's searchable text.
-        val haystack = noteHaystack(note)
+        val haystack = noteHaystack(note, checklist)
         if (terms.any { !haystack.contains(it) }) return false
         if (phrases.any { !haystack.contains(it) }) return false
 
@@ -184,7 +198,7 @@ data class SearchQuery(
         if ("done" in flags || "overdue" in flags) return false
 
         if ("attachment" in has && Attachments.parse(note.attachments).isEmpty()) return false
-        if ("subtasks" in has && Checklist.parse(note.checklist).isEmpty()) return false
+        if ("subtasks" in has && checklist.isEmpty()) return false
         if ("due" in has || "reminder" in has) return false
 
         if (priority != null || due != null) return false
@@ -198,7 +212,10 @@ data class SearchQuery(
     fun matches(task: Task, now: Long = System.currentTimeMillis()): Boolean {
         if (isEmpty) return true
 
-        val haystack = taskHaystack(task)
+        // Parsed once and shared by the haystack and the has:subtasks check below — this JSON parse
+        // used to run twice per task per keystroke.
+        val subtasks = Checklist.parse(task.subtasks)
+        val haystack = taskHaystack(task, subtasks)
         if (terms.any { !haystack.contains(it) }) return false
         if (phrases.any { !haystack.contains(it) }) return false
 
@@ -212,7 +229,7 @@ data class SearchQuery(
         if ("checklist" in flags || "archived" in flags) return false
 
         if ("attachment" in has && Attachments.parse(task.attachments).isEmpty()) return false
-        if ("subtasks" in has && Checklist.parse(task.subtasks).isEmpty()) return false
+        if ("subtasks" in has && subtasks.isEmpty()) return false
         if ("due" in has && task.dueAt == null) return false
         if ("reminder" in has && !(task.reminderEnabled && task.dueAt != null)) return false
 
@@ -242,9 +259,9 @@ data class SearchQuery(
         if (isEmpty) return 0
         val title = note.title.lowercase()
         val tagText = note.tags.lowercase()
-        val body = noteBodyText(note).lowercase()
+        val body = noteBodyText(note, if (note.isChecklist) Checklist.parse(note.checklist) else emptyList()).lowercase()
         var score = 0
-        (terms + phrases).forEach { needle ->
+        needles.forEach { needle ->
             if (title == needle) score += 100
             else if (title.startsWith(needle)) score += 50
             else if (title.contains(needle)) score += 30
@@ -261,7 +278,7 @@ data class SearchQuery(
         val notesText = task.notes.lowercase()
         val subtaskText = Checklist.parse(task.subtasks).joinToString(" ") { it.text }.lowercase()
         var score = 0
-        (terms + phrases).forEach { needle ->
+        needles.forEach { needle ->
             if (title == needle) score += 100
             else if (title.startsWith(needle)) score += 50
             else if (title.contains(needle)) score += 30
@@ -275,17 +292,20 @@ data class SearchQuery(
     // Internals
     // ---------------------------------------------------------------------------------------
 
-    private fun noteBodyText(note: Note): String =
-        if (note.isChecklist) Checklist.parse(note.checklist).joinToString(" ") { it.text } else note.body
+    // The haystack helpers take the caller's already-parsed checklist so the JSON parse happens
+    // exactly once per row, in matches()/rank(), rather than being repeated down here.
 
-    private fun noteHaystack(note: Note): String =
-        listOf(note.title, noteBodyText(note), note.tags).joinToString(" ").lowercase()
+    private fun noteBodyText(note: Note, checklist: List<ChecklistItem>): String =
+        if (note.isChecklist) checklist.joinToString(" ") { it.text } else note.body
 
-    private fun taskHaystack(task: Task): String =
+    private fun noteHaystack(note: Note, checklist: List<ChecklistItem>): String =
+        listOf(note.title, noteBodyText(note, checklist), note.tags).joinToString(" ").lowercase()
+
+    private fun taskHaystack(task: Task, subtasks: List<ChecklistItem>): String =
         listOf(
             task.title,
             task.notes,
-            Checklist.parse(task.subtasks).joinToString(" ") { it.text }
+            subtasks.joinToString(" ") { it.text }
         ).joinToString(" ").lowercase()
 
     private fun isOverdue(task: Task, now: Long): Boolean {

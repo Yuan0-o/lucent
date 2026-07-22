@@ -24,7 +24,7 @@ package com.lucent.app.data
  */
 object TokenEstimator {
 
-    private const val CHARS_PER_TOKEN = 4.0
+    private const val CHARS_PER_TOKEN = 4
 
     /** Approximate token count of a single string. */
     fun estimate(text: String?): Int {
@@ -37,7 +37,11 @@ object TokenEstimator {
             i += Character.charCount(cp)
             if (isWideScript(cp)) cjk++ else if (!Character.isWhitespace(cp)) other++
         }
-        val est = cjk + Math.ceil(other / CHARS_PER_TOKEN).toInt()
+        // Integer ceiling division: (other + 3) / 4 == ceil(other / 4.0) for every non-negative
+        // count, so the estimate is bit-identical to the old double-based version — it just skips
+        // the int→double→ceil→int round trip on a routine that runs for every message of every
+        // request the app builds.
+        val est = cjk + (other + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
         return if (est <= 0 && text.isNotBlank()) 1 else est
     }
 
