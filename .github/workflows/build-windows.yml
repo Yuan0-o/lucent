@@ -254,6 +254,17 @@ jobs:
           }
 
       # ---- WiX, required by jpackage to build a Windows .exe installer ----
+      # ---- Prove at-rest encryption before anything gets packaged ----
+      # The whole point of swapping the JDBC driver is that the desktop database is REALLY
+      # encrypted. This runs a tiny end-to-end check against the driver Gradle actually resolved
+      # (cipher core answers, file header scrambled, right key reads, wrong key rejected — see
+      # desktop/src/main/kotlin/com/lucent/desktop/CipherSelfCheck.kt) and fails the job in red if
+      # any of it is untrue. Encryption is a launch requirement, not best-effort: unlike the GPU
+      # engine, this step is allowed to stop the build.
+      - name: Verify database encryption (cipher self-check)
+        shell: pwsh
+        run: gradle :desktop:cipherSelfCheck --no-daemon --stacktrace
+
       # ---- Surface which engines actually made it into this build ----
       # A green run used to be silent about the one thing worth knowing here: whether the
       # best-effort GPU engine is in the installer, or the Vulkan chain quietly fell through
