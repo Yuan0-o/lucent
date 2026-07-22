@@ -284,15 +284,31 @@ fun AssistantScreen(active: Boolean = true) {
         } else ""
     val shownError = if (controllerError.isNotBlank()) controllerError else localError
 
-    // The "set up an API or import a local model" hint is a nudge for the current visit, not a
-    // standing banner. On Android, KeepAliveTabs keeps this screen composed across tab switches,
-    // so plain `remember` state — rightly kept alive for the draft input — also keeps this hint
-    // alive: it would still be sitting there the next time the tab was opened. Clear it the
-    // moment the screen stops being the active tab, so coming back starts clean. (On desktop the
-    // `when` host disposes the screen on switch, which resets it anyway; `active` simply never
-    // goes false there today.)
+    // Transient state is visit-scoped, not tab-scoped. On Android, KeepAliveTabs keeps this
+    // screen composed across tab switches, so plain `remember` state — rightly kept alive for the
+    // draft input and pending attachment — also keeps every notice, menu, and highlight alive:
+    // they would still be sitting there the next time the tab was opened. Fold them the moment
+    // the screen stops being the active tab, the same leave-rule Notes, Tasks, and Settings
+    // already apply. This also restores the intent of the onDispose { clearError() } below, which
+    // keep-alive quietly defeated — tab switches no longer dispose this screen, so that cleanup
+    // only runs when the whole host goes away. (On desktop the `when` host disposes the screen on
+    // switch, which resets local state and fires onDispose anyway; `active` simply never goes
+    // false there today.)
     LaunchedEffect(active) {
-        if (!active) localError = ""
+        if (!active) {
+            localError = ""
+            // A background failure should still greet the user on their next visit if it hasn't
+            // been seen; this clear runs on LEAVING, so an error raised while away is untouched
+            // and shows on arrival — it just no longer outlives the visit that saw it.
+            AssistantController.clearError()
+            // The search-hit highlight was set on jump and never cleared anywhere.
+            highlightMessageId = null
+            // Fold the conversation switcher and its history search, like the header clusters
+            // elsewhere: leaving the tab should find them tucked away again. deepMatches empties
+            // itself via the effect keyed on these two.
+            conversationMenuOpen = false
+            conversationSearch = ""
+        }
     }
 
     DisposableEffect(Unit) {

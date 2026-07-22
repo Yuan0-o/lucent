@@ -782,6 +782,10 @@ fun SettingsScreen(active: Boolean = true) {
         // its own sheet at completion time, so the line is same-visit context only — re-entering
         // the page starts it blank instead of showing a stale "Imported …" from last time.
         if (route == SettingsRoute.Data) backupStatus = ""
+        // And the Language & type page's font-import error ("that file isn't a font"): it had no
+        // such reset, so once set it lingered across every later visit — the exact staleness the
+        // three lines above were added to end.
+        if (route == SettingsRoute.Language) fontError = ""
     }
 
     // Registers this screen's dirty state with the app-lifetime guard so switching bottom-nav
