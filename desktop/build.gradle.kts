@@ -54,16 +54,35 @@ dependencies {
 
     // SQLite JDBC driver — io.github.willena:sqlite-jdbc, the drop-in Xerial build whose SQLite
     // core is SQLite3MultipleCiphers, i.e. it speaks the SQLCipher scheme Db.kt keys with. This is
-    // what makes the desktop database encrypted at rest, restoring parity with Android; Db.kt also
-    // migrates a database created by the earlier (unencrypted, org.xerial) builds in place on first
-    // open. If THIS exact version ever fails to resolve, do not fall back to org.xerial — that
-    // silently ships an unencrypted store; instead pick another release from
-    // https://central.sonatype.com/artifact/io.github.willena/sqlite-jdbc (3.44.1.0, 3.46.1.3 and
-    // 3.49.1.0 are other lines that have shipped) — the Db.kt code path is identical for all of them.
-    implementation("io.github.willena:sqlite-jdbc:3.45.1.6")
+    // what makes the desktop database encrypted at rest, restoring parity with Android.
+    //
+    // The version is a RICH constraint on purpose: prefer a specific release, but accept anything
+    // in the 3.44+ line if that exact number was never published — so resolution cannot fail on a
+    // guessed digit, and the `cipherSelfCheck` step in CI then proves the resolved driver really
+    // encrypts before anything is packaged. Once the first green run reports the resolved version
+    // (visible in its dependency output), replace this block with a plain hard pin of that number.
+    // NEVER fall back to org.xerial here — that silently ships an unencrypted store, and the
+    // self-check below will (rightly) fail the build in red if anyone tries.
+    implementation("io.github.willena:sqlite-jdbc") {
+        version {
+            strictly("[3.44.0.0,4.0.0[")
+            prefer("3.45.1.6")
+        }
+    }
 
     // PDF export and in-app PDF attachment preview (replaces Android's PdfRenderer with PDFBox).
     implementation("org.apache.pdfbox:pdfbox:3.0.3")
+}
+
+// CI proof that the desktop database is REALLY encrypted with the driver Gradle resolved — see
+// CipherSelfCheck.kt for what it asserts. Wired into build-windows.yml as its own red/green step
+// before packaging; encryption is a launch requirement, so unlike the GPU engine it is allowed to
+// stop the build.
+tasks.register<org.gradle.api.tasks.JavaExec>("cipherSelfCheck") {
+    group = "verification"
+    description = "Prove at-rest encryption end to end with the resolved sqlite-jdbc driver."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.lucent.desktop.CipherSelfCheckKt")
 }
 
 compose.desktop {
