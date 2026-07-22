@@ -104,6 +104,25 @@ fun AssistantConfirmationDialog() {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(S.confirmEditHint, fontSize = 12.sp)
                 }
+                if (confirm.editorKind != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // "Approve and fine-tune": runs the action exactly as shown (including the edit
+                    // above, if any) through the normal tool path — so every guarantee the tools
+                    // give still holds — and then opens the created or edited item's own page,
+                    // where every remaining detail can be adjusted with the real note/task editor
+                    // instead of a dialog field.
+                    TextButton(
+                        onClick = {
+                            AssistantController.resolveConfirmation(
+                                approved = true,
+                                editedValue = if (confirm.editKey != null) draft else null,
+                                openInEditor = true
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(S.confirmOpenEditor) }
+                    Text(S.confirmOpenEditorHint, fontSize = 12.sp)
+                }
             }
         },
         confirmButton = {

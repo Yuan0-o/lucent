@@ -143,6 +143,7 @@ fun SettingsScreen(active: Boolean = true) {
     val savedMemoryTier by repo.memoryTier.collectAsState(initial = MemoryTier.DEFAULT.key)
     val savedWebSearch by repo.webSearchEnabled.collectAsState(initial = false)
     val savedTypingHaptics by repo.typingHapticsEnabled.collectAsState(initial = true)
+    val savedConfirmTools by repo.assistantConfirmToolsEnabled.collectAsState(initial = true)
     // Editor: whether note bodies are treated as Markdown. Off by default. See SettingsRepository.
     val markdownEnabled by repo.markdownEnabled.collectAsState(initial = false)
     // Editor: whether links are active (task 8). A sub-toggle of Markdown — only live when both are
@@ -1042,7 +1043,7 @@ fun SettingsScreen(active: Boolean = true) {
                     // font preference points at — see BackupManager). Unlike model files they are
                     // small, so they get no opt-out of their own, but the size is still quoted:
                     // a module that adds megabytes to the file should say so where it is ticked.
-                    val importedFontBytes = remember { FontStore.totalFontBytes(context) }
+                    val importedFontBytes = remember(fontRefresh) { FontStore.totalFontBytes(context) }
                     if (importedFontBytes > 0L) {
                         Text(
                             S.backupModSettingsFontsDesc(AttachmentLimits.formatBytes(importedFontBytes)),
@@ -1068,7 +1069,7 @@ fun SettingsScreen(active: Boolean = true) {
                     // real size attached: "include local model files" means something very
                     // different at 40 MB than at 4 GB, and the number is the only honest way to
                     // say which one this phone is about to do.
-                    val modelBytes = remember { LocalModelStore.totalModelBytes(context) }
+                    val modelBytes = remember(lmRefresh) { LocalModelStore.totalModelBytes(context) }
                     if (modelBytes > 0L) {
                         BackupModuleRow(
                             S.backupModLocalModelFiles,
@@ -1886,6 +1887,78 @@ fun SettingsScreen(active: Boolean = true) {
     }
     if (showShareWarning) { ShareWarningDialog() }
 
+    // --- App-Lock gate for the danger zone ---
+    //
+    // When App Lock is on, the four destructive clears (all data / notes / tasks / chats) must be
+    // confirmed with the lock password. The destructive dialogs themselves stay exactly as they
+    // are; their confirm buttons route through requireLockAuth, which either runs the wipe
+    // directly (lock off) or parks it behind this password prompt. The password is verified
+    // against the same PBKDF2 credentials the lock screen uses, and a wrong entry stays in the
+    // dialog with the standard error line rather than silently doing nothing.
+    var dangerAuthAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var dangerAuthPw by remember { mutableStateOf("") }
+    var dangerAuthError by remember { mutableStateOf("") }
+
+    fun requireLockAuth(action: () -> Unit) {
+        if (appLockOn && appLockCreds.isNotEmpty()) {
+            dangerAuthPw = ""
+            dangerAuthError = ""
+            dangerAuthAction = action
+        } else {
+            action()
+        }
+    }
+
+    @Composable
+    @NonRestartableComposable
+    fun DangerAuthDialog() {
+        AlertDialog(
+            onDismissRequest = { dangerAuthAction = null; dangerAuthPw = ""; dangerAuthError = "" },
+            title = { Text(S.dangerAuthTitle) },
+            text = {
+                Column {
+                    Text(S.dangerAuthBody)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = dangerAuthPw,
+                        onValueChange = { dangerAuthPw = it; dangerAuthError = "" },
+                        label = { Text(S.lockPassword) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (dangerAuthError.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(dangerAuthError, color = Color(0xFFFF8A80), fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = dangerAuthPw.isNotEmpty(),
+                    onClick = {
+                        if (AppLock.verifyPassword(appLockCreds, dangerAuthPw)) {
+                            val action = dangerAuthAction
+                            dangerAuthAction = null
+                            dangerAuthPw = ""
+                            dangerAuthError = ""
+                            action?.invoke()
+                        } else {
+                            dangerAuthError = S.lockWrongPassword
+                        }
+                    }
+                ) { Text(S.actionConfirm) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    dangerAuthAction = null; dangerAuthPw = ""; dangerAuthError = ""
+                }) { Text(S.actionCancel) }
+            }
+        )
+    }
+    if (dangerAuthAction != null) { DangerAuthDialog() }
+
+
     @Composable
     @NonRestartableComposable
     fun ClearDataDialog() {
@@ -1896,7 +1969,9 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     showClearData = false
-                    AppScope.io.launch {
+                    // App Lock on → the wipe below runs only after the password prompt
+                    // (requireLockAuth / DangerAuthDialog); lock off → it runs immediately.
+                    requireLockAuth { AppScope.io.launch {
                         // Cancel every scheduled reminder *before* the rows they point at disappear.
                         // An alarm outlives the task it belongs to: skip this and a notification for
                         // a task that no longer exists anywhere in the app can still fire hours
@@ -1928,6 +2003,12 @@ fun SettingsScreen(active: Boolean = true) {
                         // in cacheDir. The OS clears that eventually; "delete everything" should
                         // not mean "eventually".
                         com.lucent.app.data.AttachmentAccess.clearPreviewCache(appContext)
+                        // Everything else parked in cacheDir goes too — restore temp blobs from an
+                        // interrupted import, decode scratch files, whatever a future feature puts
+                        // there. Cache contents are disposable by definition, and "delete
+                        // everything" should leave the cache looking like first launch, not
+                        // "whenever the OS gets around to it".
+                        appContext.cacheDir.listFiles()?.forEach { f -> runCatching { f.deleteRecursively() } }
 
                         // ---- The imported local models (task 8) ----
                         //
@@ -1981,6 +2062,16 @@ fun SettingsScreen(active: Boolean = true) {
 
                         withContext(Dispatchers.Main) {
                             backupStatus = ""
+                            // The local-model list on this page is remember()ed off lmRefresh.
+                            // Without this bump it keeps rendering the pre-wipe snapshot — model
+                            // names whose files are gone, showing as "0 MB" and still marked
+                            // Active — until the screen happens to be rebuilt. That stale ghost
+                            // was the reported "cleared all data, the model name is still there"
+                            // bug; the store itself was wiped correctly above. The font list
+                            // and the byte figures on the export sheet are remember()ed the same
+                            // way, so they get the same treatment.
+                            lmRefresh++
+                            fontRefresh++
                             // The assistant holds the current conversation id in memory; the row
                             // it points at is gone, so reset it to the greeting rather than
                             // leaving it observing a conversation that no longer exists.
@@ -1988,7 +2079,7 @@ fun SettingsScreen(active: Boolean = true) {
                             LucentToast.show(appContext, S.allDataClearedToast)
                         }
                     }
-                }) { Text(S.deleteEverything) }
+                } }) { Text(S.deleteEverything) }
             },
             dismissButton = { TextButton(onClick = { showClearData = false }) { Text(S.actionCancel) } }
         )
@@ -2008,7 +2099,9 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     showClearNotes = false
-                    AppScope.io.launch {
+                    // App Lock on → the wipe below runs only after the password prompt
+                    // (requireLockAuth / DangerAuthDialog); lock off → it runs immediately.
+                    requireLockAuth { AppScope.io.launch {
                         // A note's revision history belongs to the note. Leaving it behind would
                         // orphan every row and quietly grow a table nothing can ever reach again.
                         db.noteVersionDao().clearAll()
@@ -2016,7 +2109,7 @@ fun SettingsScreen(active: Boolean = true) {
                         com.lucent.app.data.AttachmentMigration.pruneOrphans(appContext)
                         withContext(Dispatchers.Main) { LucentToast.show(appContext, S.notesClearedToast) }
                     }
-                }) { Text(S.deleteNotesBtn) }
+                } }) { Text(S.deleteNotesBtn) }
             },
             dismissButton = { TextButton(onClick = { showClearNotes = false }) { Text(S.actionCancel) } }
         )
@@ -2033,7 +2126,9 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     showClearTasks = false
-                    AppScope.io.launch {
+                    // App Lock on → the wipe below runs only after the password prompt
+                    // (requireLockAuth / DangerAuthDialog); lock off → it runs immediately.
+                    requireLockAuth { AppScope.io.launch {
                         // Same reasoning as "Clear all data": an alarm outlives its task unless it's
                         // explicitly cancelled first.
                         db.taskDao().getAllOnce().forEach {
@@ -2043,7 +2138,7 @@ fun SettingsScreen(active: Boolean = true) {
                         com.lucent.app.data.AttachmentMigration.pruneOrphans(appContext)
                         withContext(Dispatchers.Main) { LucentToast.show(appContext, S.tasksClearedToast) }
                     }
-                }) { Text(S.deleteTasksBtn) }
+                } }) { Text(S.deleteTasksBtn) }
             },
             dismissButton = { TextButton(onClick = { showClearTasks = false }) { Text(S.actionCancel) } }
         )
@@ -2086,13 +2181,15 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     showClearChats = false
-                    AppScope.io.launch {
+                    // App Lock on → the wipe below runs only after the password prompt
+                    // (requireLockAuth / DangerAuthDialog); lock off → it runs immediately.
+                    requireLockAuth { AppScope.io.launch {
                         db.chatDao().clearAll()
                         db.chatConversationDao().clearAll()
                         AssistantController.onAllChatsCleared(appContext)
                         withContext(Dispatchers.Main) { LucentToast.show(appContext, S.chatsClearedToast) }
                     }
-                }) { Text(S.deleteChatsBtn) }
+                } }) { Text(S.deleteChatsBtn) }
             },
             dismissButton = { TextButton(onClick = { showClearChats = false }) { Text(S.actionCancel) } }
         )
@@ -2915,6 +3012,30 @@ fun SettingsScreen(active: Boolean = true) {
                     Switch(
                         checked = savedTypingHaptics,
                         onCheckedChange = { on -> AppScope.io.launch { repo.setTypingHapticsEnabled(on) } }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Whether the assistant must ask before EVERY tool call — reads as well as writes,
+            // cloud and on-device alike. Default ON. Turning it off removes the confirmation
+            // modal entirely; the subtitle says so in plain words, because the switch trades
+            // oversight for convenience and that trade should never be made by accident.
+            Column(modifier = Modifier.fillMaxWidth().frostedGlass().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(S.assistantConfirmToolsTitle, color = onGradient, fontSize = 16.sp)
+                        Text(
+                            S.assistantConfirmToolsSub,
+                            color = onGradientMuted,
+                            fontSize = 13.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Switch(
+                        checked = savedConfirmTools,
+                        onCheckedChange = { on -> AppScope.io.launch { repo.setAssistantConfirmTools(on) } }
                     )
                 }
             }

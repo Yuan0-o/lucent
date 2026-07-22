@@ -125,14 +125,29 @@ object AssistantController {
         val toolName: String,
         val editKey: String? = null,
         val editLabel: String = "",
-        val editValue: String = ""
+        val editValue: String = "",
+        // Non-null when an approved call would create or edit a note/task the app can open — the
+        // dialog then also offers "approve and fine-tune in the editor" (see AssistantConfirmationDialog).
+        val editorKind: EditorKind? = null
     )
 
-    /** The user's answer to a confirmation, plus their edit of the offered field when they made one. */
-    private data class ConfirmationOutcome(val approved: Boolean, val editedValue: String? = null)
+    /** The kind of item an approved call would create or edit, for the dialog's editor entry. */
+    enum class EditorKind { NOTE, TASK }
+
+    /** The user's answer to a confirmation, plus their edit of the offered field when they made one.
+     *  [openInEditor] is the "approve and fine-tune" choice: run the action, then open its item. */
+    private data class ConfirmationOutcome(
+        val approved: Boolean,
+        val editedValue: String? = null,
+        val openInEditor: Boolean = false
+    )
 
     /** A confirmation that has been answered: the decision, and the arguments to actually run. */
-    private data class ConfirmedCall(val approved: Boolean, val argumentsJson: String)
+    private data class ConfirmedCall(
+        val approved: Boolean,
+        val argumentsJson: String,
+        val openInEditor: Boolean = false
+    )
 
     var messages by mutableStateOf<List<ChatMessage>>(emptyList())
         private set
@@ -248,6 +263,12 @@ object AssistantController {
         currentConversationId = null
         // Every conversation an error could have belonged to is gone; clear unconditionally.
         clearError()
+        // Same for the retry machinery: a network-error modal still on screen describes a
+        // conversation that no longer exists, and its Retry must not be able to re-send wiped
+        // data into the fresh app.
+        networkErrorMessage = null
+        lastSend = null
+        lastSendConversationId = null
         observeCurrentConversation(db)
     }
 
@@ -396,11 +417,11 @@ object AssistantController {
      * coroutine, which then either runs the tool (approved) or reports the refusal to the model
      * (denied) so it knows the action did not happen.
      */
-    fun resolveConfirmation(approved: Boolean, editedValue: String? = null) {
+    fun resolveConfirmation(approved: Boolean, editedValue: String? = null, openInEditor: Boolean = false) {
         pendingConfirmation = null
         val turn = confirmingTurn
         confirmingTurn = null
-        turn?.confirmationDeferred?.complete(ConfirmationOutcome(approved, editedValue))
+        turn?.confirmationDeferred?.complete(ConfirmationOutcome(approved, editedValue, openInEditor))
         turn?.confirmationDeferred = null
     }
 
@@ -530,7 +551,8 @@ object AssistantController {
         val memoryTier: MemoryTier, val webSearchEnabled: Boolean, val typingHaptics: Boolean,
         val useLocalModel: Boolean = false,
         val useLocalTools: Boolean = false,
-        val useLocalGpu: Boolean = false
+        val useLocalGpu: Boolean = false,
+        val confirmTools: Boolean = true
     )
     private var lastSend: LastSend? = null
     // The conversation the failed turn belonged to, captured together with [lastSend] at failure
@@ -556,6 +578,7 @@ object AssistantController {
             p.key, p.model, p.name, p.style, p.memoryTier, p.webSearchEnabled, p.typingHaptics,
             insertUserMessage = false, useLocalModel = p.useLocalModel,
             useLocalTools = p.useLocalTools, useLocalGpu = p.useLocalGpu,
+            confirmTools = p.confirmTools,
             // The failed turn's own conversation: the user may have moved to another chat while
             // the error modal was up, and the retry must not land wherever they happen to be now.
             targetConversationId = target
@@ -715,6 +738,9 @@ object AssistantController {
         useLocalModel: Boolean = false,
         useLocalTools: Boolean = false,
         useLocalGpu: Boolean = false,
+        // Whether every tool call this turn makes — reads as well as writes — must be confirmed by
+        // the user first (the Settings toggle, default ON). OFF runs tools directly, no modal.
+        confirmTools: Boolean = true,
         // Non-null only on the Retry path: the conversation the failed turn belongs to, so the
         // re-run writes there even if the user has since moved to another chat. A fresh send
         // always targets the conversation currently on screen.
@@ -731,7 +757,7 @@ object AssistantController {
         turn.params = LastSend(
             text, attachmentMime, attachmentData, attachmentName, url, spec, key, model,
             name, style, memoryTier, webSearchEnabled, typingHapticsEnabled, useLocalModel,
-            useLocalTools, useLocalGpu
+            useLocalTools, useLocalGpu, confirmTools
         )
         turn.thinking = true
         // Clear a leftover error banner only when it belongs to the conversation being sent in;
@@ -800,7 +826,7 @@ object AssistantController {
                     // The turn was flagged local at construction; the lifecycle paths read that
                     // off the registry — only a LOCAL turn holds gigabytes of RAM, and only a
                     // local turn is stopped by leaving its conversation or the app (task 2).
-                    runLocalTurn(turn, db, conversationId, useLocalTools, useLocalGpu, memoryTier)
+                    runLocalTurn(turn, db, conversationId, useLocalTools, useLocalGpu, confirmTools, memoryTier)
                     return@launch // the shared finally below still cleans this turn's state
                 }
 
@@ -869,7 +895,11 @@ object AssistantController {
                             continue
                         }
 
-                        val confirmed = if (AppTools.isMutating(call.name)) {
+                        // EVERY call is confirmed while the Settings toggle is on — reads as well
+                        // as writes — because "the assistant acts only with my say-so" is the
+                        // contract that toggle promises. With it off nothing asks; isMutating now
+                        // only shapes the dialog's title, never whether it appears.
+                        val confirmed = if (confirmTools) {
                             confirmToolCall(turn, call.name, call.argumentsJson)
                         } else ConfirmedCall(approved = true, argumentsJson = call.argumentsJson)
 
@@ -900,6 +930,7 @@ object AssistantController {
                             uploadMime, uploadData, uploadName
                         )
                         executed[sig] = r
+                        maybeOpenInEditor(confirmed, r)
                         results.add(r)
                     }
                     if (declinedDetails != null) break
@@ -1052,6 +1083,7 @@ object AssistantController {
         conversationId: Long,
         useTools: Boolean,
         useGpu: Boolean,
+        confirmTools: Boolean,
         // The memory tier now reaches this path instead of being hard-coded to MEDIUM. In local mode
         // Settings offers LOW and MEDIUM and withholds HIGH (task 8), so honouring the value here is
         // what makes that choice mean anything: LOW sends just the latest message, MEDIUM sends the
@@ -1165,6 +1197,23 @@ object AssistantController {
 
             val call = parseLocalToolCall(raw, validToolNames)
             if (call == null) {
+                val attempted = attemptedToolCallName(raw)
+                if (attempted != null && round < MAX_LOCAL_TOOL_ROUNDS - 1) {
+                    // Shaped like a tool call, but it names no tool that exists even after alias
+                    // mapping. Showing the raw JSON as the reply is the one unacceptable outcome
+                    // (the reported bug), and silently dropping the action the user asked for is
+                    // the second-worst — so the mistake goes back into the transcript, named
+                    // precisely, and the model gets another round to use a real tool or answer
+                    // in prose.
+                    messages.add("assistant" to raw.trim().take(600))
+                    messages.add(
+                        "tool" to ("Result of " + attempted + ": ERROR — no tool named \"" + attempted +
+                            "\" exists. Use EXACTLY one tool name from the list in the system " +
+                            "message, or answer the user in plain text without any JSON.")
+                    )
+                    round++
+                    continue
+                }
                 // Plain prose → this is the final answer.
                 finalText = deRobotify(raw).trim()
                 break
@@ -1177,7 +1226,8 @@ object AssistantController {
             val sig = signatureOf(call.name, call.argsJson)
             val cached = executed[sig]
             val result = if (cached != null) cached else {
-                val confirmed = if (AppTools.isMutating(call.name)) {
+                // Same contract as the cloud loop: the toggle decides, not the tool's category.
+                val confirmed = if (confirmTools) {
                     confirmToolCall(turn, call.name, call.argsJson)
                 } else ConfirmedCall(approved = true, argumentsJson = call.argsJson)
 
@@ -1203,6 +1253,7 @@ object AssistantController {
                     uploadMime, uploadData, uploadName
                 )
                 executed[sig] = r
+                maybeOpenInEditor(confirmed, r)
                 r
             }
             toolResults.add(result)
@@ -1223,6 +1274,20 @@ object AssistantController {
             val rc = com.lucent.app.local.LocalLlm.generate(messages) { piece -> turn.onDelta(finalEpoch, piece) }
             if (rc == 1) return
             finalText = deRobotify(turn.snapshotBuffer()).trim()
+        }
+
+        // A model that never recovered can leave tool-JSON standing as its "answer". Raw JSON must
+        // never reach the screen, so a mostly-JSON final is dropped here and replyContent below
+        // falls back to its honest summary of what the tools actually did, or its friendly
+        // ask-again line — both in the user's language.
+        run {
+            val ft = finalText
+            if (ft != null && attemptedToolCallName(ft) != null) {
+                val shape = ft.trim()
+                if (shape.startsWith("{") || shape.startsWith("<tool_call") || shape.startsWith("```")) {
+                    finalText = ""
+                }
+            }
         }
 
         // Honest final text: the model's own words if it wrote any, otherwise a summary of what the
@@ -1357,7 +1422,9 @@ object AssistantController {
             append("or look something up, reply with EXACTLY ONE JSON object and nothing else, in this exact form:\n")
             append("{\"tool\": \"<tool_name>\", \"arguments\": { ... }}\n")
             append("When calling a tool: output the raw JSON with no code fences and no words before or after it; ")
-            append("use only the tools listed below; include only the arguments you need. ")
+            append("use only the tools listed below, copying the tool name EXACTLY as written ")
+            append("(for example create_task — never an invented variant like add_task); ")
+            append("include only the arguments you need. ")
             append("After each tool runs you receive a line beginning \"Result of <tool>:\". ")
             append("Then either call another tool the same way, or — once the task is done — write your final answer ")
             append("to the user in their language as plain text (no JSON). ")
@@ -1404,16 +1471,120 @@ object AssistantController {
      */
     private fun parseLocalToolCall(raw: String, valid: Set<String>): LocalToolCall? {
         if (raw.isBlank()) return null
+        val s = stripToolWrappers(raw)
+
+        for (candidate in jsonObjectCandidates(s)) {
+            var obj = try { org.json.JSONObject(candidate) } catch (e: Exception) { continue }
+            // Some models nest the call one level deep ({"tool_call": {"name": …}}); unwrap it.
+            // optJSONObject is null when the key holds a string, so flat forms pass unchanged.
+            for (k in TOOL_WRAPPER_KEYS) obj.optJSONObject(k)?.let { obj = it }
+            val rawName = firstJsonString(obj, "tool", "name", "function", "action", "tool_name")?.trim()
+            if (rawName.isNullOrBlank()) continue
+            // Exact match first; then alias mapping, because small on-device models routinely
+            // invent near-miss names — the reported bug was Qwen2.5-0.5B emitting "add_task"
+            // for create_task and the raw JSON landing on screen as the reply.
+            val name = resolveToolName(rawName, valid) ?: continue
+            val argsObj = firstJsonObject(obj, "arguments", "args", "parameters", "input", "params")
+            return LocalToolCall(name, stripBlankArguments(argsObj).toString())
+        }
+        return null
+    }
+
+    // Wrapper keys some chat templates put around the call object itself.
+    private val TOOL_WRAPPER_KEYS = arrayOf("tool_call", "function_call", "call", "tool", "function", "action")
+
+    /** Peel `<tool_call>` tags and code fences off a model's output before scanning it for JSON. */
+    private fun stripToolWrappers(raw: String): String {
         var s = raw.trim()
         Regex("(?s)<tool_call>(.*?)</tool_call>").find(s)?.let { s = it.groupValues[1].trim() }
         Regex("(?s)```(?:json|tool_call)?\\s*(.*?)```").find(s)?.let { s = it.groupValues[1].trim() }
+        return s
+    }
 
+    /**
+     * Map a model-emitted tool name onto a real one. Exact (after snake_case normalisation) wins;
+     * otherwise the leading verb is swapped through its synonym group and the trailing noun through
+     * singular/plural, and the first candidate that names a real tool is taken ("add_task" →
+     * create_task, "edit_note" → update_note, "list_task" → list_tasks). As a last resort a UNIQUE
+     * containment match is accepted. Anything still unresolved is null — the caller decides whether
+     * to feed an error back to the model rather than guessing at an action on the user's data.
+     */
+    private fun resolveToolName(rawName: String, valid: Set<String>): String? {
+        val n = rawName.trim().lowercase().replace(Regex("[\\s\\-]+"), "_").trim('_')
+        if (n.isBlank()) return null
+        if (n in valid) return n
+
+        val tokens = n.split('_').filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return null
+        val verbGroups = listOf(
+            setOf("create", "add", "new", "make", "insert"),
+            setOf("delete", "remove", "del", "erase", "discard"),
+            setOf("update", "edit", "modify", "change", "rename"),
+            setOf("complete", "finish", "done", "check", "close"),
+            setOf("read", "get", "show", "view", "open"),
+            setOf("list", "show", "view", "get"),
+            setOf("reopen", "uncomplete", "undone", "uncheck"),
+            setOf("search", "find", "query", "lookup")
+        )
+        val firstVariants = linkedSetOf(tokens.first())
+        for (g in verbGroups) if (tokens.first() in g) firstVariants.addAll(g)
+        val last = tokens.last()
+        val lastVariants = linkedSetOf(last, if (last.endsWith("s")) last.dropLast(1) else last + "s")
+
+        val candidates = linkedSetOf<String>()
+        if (tokens.size == 1) {
+            candidates.addAll(firstVariants)
+            candidates.addAll(lastVariants)
+        } else {
+            val mid = tokens.subList(1, tokens.size - 1)
+            for (fv in firstVariants) for (lv in lastVariants) {
+                candidates.add((listOf(fv) + mid + lv).joinToString("_"))
+            }
+        }
+        candidates.firstOrNull { it in valid }?.let { return it }
+
+        // e.g. "task_search" or "notes" alone: accept only when exactly ONE real tool matches.
+        val containment = valid.filter { it.contains(n) || n.contains(it) }
+        return containment.singleOrNull()
+    }
+
+    /**
+     * Drop arguments a weak model filled with "" / null instead of omitting (the reported call
+     * carried due:"", priority:"", repeat:"" …). Empty means "not provided" for every tool here —
+     * update_* tools in particular treat an absent field as "leave unchanged", which is exactly
+     * what an empty string was meant to say.
+     */
+    private fun stripBlankArguments(argsObj: org.json.JSONObject?): org.json.JSONObject {
+        val cleaned = org.json.JSONObject()
+        if (argsObj == null) return cleaned
+        for (k in argsObj.keys()) {
+            val v = argsObj.opt(k)
+            val keep = when (v) {
+                null, org.json.JSONObject.NULL -> false
+                is String -> v.isNotBlank()
+                else -> true
+            }
+            if (keep) cleaned.put(k, v)
+        }
+        return cleaned
+    }
+
+    /**
+     * The name a model TRIED to call when its output is shaped like a tool call but doesn't parse
+     * into a valid one — snake_case name plus an arguments object, or an arguments object alone.
+     * Null for plain prose. Deliberately stricter than the parser about what counts as "shaped
+     * like a call", so an ordinary answer that happens to contain a JSON example isn't flagged.
+     */
+    private fun attemptedToolCallName(raw: String): String? {
+        if (raw.isBlank()) return null
+        val s = stripToolWrappers(raw)
         for (candidate in jsonObjectCandidates(s)) {
-            val obj = try { org.json.JSONObject(candidate) } catch (e: Exception) { continue }
+            var obj = try { org.json.JSONObject(candidate) } catch (e: Exception) { continue }
+            for (k in TOOL_WRAPPER_KEYS) obj.optJSONObject(k)?.let { obj = it }
             val name = firstJsonString(obj, "tool", "name", "function", "action", "tool_name")?.trim()
-            if (name.isNullOrBlank() || name !in valid) continue
-            val argsObj = firstJsonObject(obj, "arguments", "args", "parameters", "input", "params")
-            return LocalToolCall(name, (argsObj ?: org.json.JSONObject()).toString())
+            val hasArgs = firstJsonObject(obj, "arguments", "args", "parameters", "input", "params") != null
+            if (!name.isNullOrBlank() && (hasArgs || Regex("^[a-z0-9]+(_[a-z0-9]+)+$").matches(name))) return name
+            if (name.isNullOrBlank() && hasArgs) return "(unnamed)"
         }
         return null
     }
@@ -1568,7 +1739,8 @@ object AssistantController {
                 toolName = name,
                 editKey = editable?.key,
                 editLabel = editable?.label.orEmpty(),
-                editValue = editable?.value.orEmpty()
+                editValue = editable?.value.orEmpty(),
+                editorKind = editorKindFor(name)
             )
             return try {
                 val outcome = deferred.await()
@@ -1580,7 +1752,7 @@ object AssistantController {
                     if (outcome.approved && editable != null && !edited.isNullOrBlank() && edited != editable.value) {
                         AppTools.withArgument(argsJson, editable.key, edited)
                     } else argsJson
-                ConfirmedCall(outcome.approved, finalArgs)
+                ConfirmedCall(outcome.approved, finalArgs, outcome.openInEditor)
             } finally {
                 if (confirmingTurn === turn) {
                     confirmingTurn = null
@@ -1588,6 +1760,30 @@ object AssistantController {
                 }
                 turn.confirmationDeferred = null
             }
+        }
+    }
+
+    /** Which item page "approve and fine-tune" would open for [name], or null when there is none. */
+    private fun editorKindFor(name: String): EditorKind? = when (name) {
+        "create_note", "update_note" -> EditorKind.NOTE
+        "create_task", "update_task" -> EditorKind.TASK
+        else -> null
+    }
+
+    /**
+     * The "approve and fine-tune in the editor" landing: the action has ALREADY run through the
+     * normal tool path — so nothing here can ever drift from what execute() does, and every
+     * guarantee the tools give (history snapshots, reminder sync, honest failure reporting) holds
+     * unchanged — and this only carries the user to the row it produced. AppNavigation fields are
+     * snapshot state, safe to write from the generation thread.
+     */
+    private fun maybeOpenInEditor(confirmed: ConfirmedCall, result: ToolExecResult) {
+        if (!confirmed.openInEditor || !result.success) return
+        val noteId = result.openNoteId
+        val taskId = result.openTaskId
+        when {
+            noteId != null -> com.lucent.app.AppNavigation.openNote(noteId)
+            taskId != null -> com.lucent.app.AppNavigation.openTask(taskId)
         }
     }
 
@@ -1650,7 +1846,13 @@ object AssistantController {
      */
     private fun replyContent(text: String?, hasImage: Boolean, toolResults: List<ToolExecResult>, userText: String = ""): String {
         val cleaned = text?.let { deRobotify(it).trim() }
-        if (!cleaned.isNullOrBlank() && !isTerseNonAnswer(cleaned)) return cleaned
+        // A small model sometimes answers a SUCCESSFUL tool run with "i cant" — the transcript
+        // confused it, the task exists, and the words flatly contradict what just happened (the
+        // reported "created the task, replied i can't" bug). When a short bare refusal denies an
+        // action the results prove, the honest tool summary below wins over the model's words.
+        val deniesRealSuccess =
+            !cleaned.isNullOrBlank() && toolResults.any { it.success } && isBareRefusal(cleaned)
+        if (!cleaned.isNullOrBlank() && !isTerseNonAnswer(cleaned) && !deniesRealSuccess) return cleaned
 
         val failures = toolResults.filter { !it.success }
         if (failures.isNotEmpty()) return failures.joinToString(" ") { it.summary }
@@ -1687,6 +1889,23 @@ object AssistantController {
                 return EN
             }
         }
+    }
+
+    /**
+     * A short reply whose whole content is "I can't" in any of the app's four languages. Kept
+     * deliberately narrow — anything over 64 characters, or with substance beyond the refusal,
+     * passes through untouched, because second-guessing real prose would be worse than the
+     * occasional confused line this exists to catch. Only consulted when a tool actually
+     * succeeded this turn (see replyContent), so it can never suppress a legitimate "I can't"
+     * about something the assistant truly cannot do.
+     */
+    private fun isBareRefusal(s: String): Boolean {
+        val t = s.trim()
+        if (t.isEmpty() || t.length > 64) return false
+        val latin = t.lowercase().replace(Regex("[^a-z ]"), " ").replace(Regex("\\s+"), " ").trim()
+        if (Regex("^(sorry )?(but )?i (just )?(really )?(can ?no ?t|can ?t|cannot|am unable to|am not able to)\\b").containsMatchIn(latin)) return true
+        val cjk = arrayOf("我不能", "我无法", "无法完成", "做不到", "帮不了", "できません", "できかねます", "私にはできません", "할 수 없", "못해요", "못합니다")
+        return cjk.any { t.contains(it) }
     }
 
     /** A reply that's technically present but says nothing — the exact shapes issue 10 shows. */

@@ -187,6 +187,8 @@ fun AssistantScreen(active: Boolean = true) {
     val memoryTierKey by repo.memoryTier.collectAsState(initial = MemoryTier.DEFAULT.key)
     val webSearchEnabled by repo.webSearchEnabled.collectAsState(initial = false)
     val typingHapticsEnabled by repo.typingHapticsEnabled.collectAsState(initial = true)
+    // Whether every assistant tool call is confirmed in a dialog first (Settings toggle, default ON).
+    val confirmToolsEnabled by repo.assistantConfirmToolsEnabled.collectAsState(initial = true)
     // Local-model routing (task: on-device GGUF assistant), read live like the rows above so
     // flipping the toggle in Settings changes where the very next send goes.
     val localModelEnabled by repo.localModelEnabled.collectAsState(initial = false)
@@ -1193,7 +1195,8 @@ fun AssistantScreen(active: Boolean = true) {
                             typingHapticsEnabled = typingHapticsEnabled,
                             useLocalModel = useLocal,
                             useLocalTools = localToolsEnabled,
-                            useLocalGpu = localGpuEnabled
+                            useLocalGpu = localGpuEnabled,
+                            confirmTools = confirmToolsEnabled
                         )
                     }
                 ) {

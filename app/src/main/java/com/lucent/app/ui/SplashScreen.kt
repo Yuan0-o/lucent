@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
@@ -403,10 +404,12 @@ private fun DrawScope.drawCat(
         drawPath(tail, Line.copy(alpha = solid), style = Stroke(width = 19f, cap = StrokeCap.Round))
         drawPath(tail, Fur.copy(alpha = solid), style = Stroke(width = 11f, cap = StrokeCap.Round))
 
-        // Body, with a soft pink wash along its bottom edge.
+        // Body, with a soft pink wash along its bottom edge. The wash is CLIPPED to the body:
+        // the airbrush has no edge of its own, and unclipped it sprayed past the bottom outline
+        // and sat on the background as a floating halo under the cat (reported artifact #3).
         drawPath(body, Fur.copy(alpha = solid))
         drawPath(body, Line.copy(alpha = solid), style = Stroke(width = 7f))
-        blush(Offset(0f, 200f), 70f, 0.43f * solid)
+        clipPath(body) { blush(Offset(0f, 200f), 70f, 0.43f * solid) }
 
         // Butter tummy patch.
         val bellyRect = Rect(-44f, 86f, 44f, 146f)
@@ -444,15 +447,20 @@ private fun DrawScope.drawCat(
             }
         }
 
-        // Head over the paws' tops, then its airbrushed pinks: ear tips, big cheeks, side glow.
+        // Head over the paws' tops, then its airbrushed pinks: ear tips and big cheeks. The old
+        // third spray — a "side glow" at the head's edge — is gone outright: it fell almost
+        // entirely outside the outline at that height, so it read as two hazy blobs floating
+        // beside the ears (reported artifacts #1 and #2). The remaining pinks are CLIPPED to the
+        // head so the edgeless airbrush can never drift onto the background either.
         drawPath(head, Fur.copy(alpha = solid))
         drawPath(head, Line.copy(alpha = solid), style = Stroke(width = 7f))
-        for (i in 0..1) {
-            val side = if (i == 0) -1f else 1f
-            // Ear-tip pink, raised to sit inside the new triangular ear rather than the old round bump.
-            blush(Offset(side * 92f, -152f), 30f, 0.49f * solid)
-            blush(Offset(side * 100f, -6f), 54f, 0.65f * solid)
-            blush(Offset(side * 126f, -64f), 38f, 0.33f * solid)
+        clipPath(head) {
+            for (i in 0..1) {
+                val side = if (i == 0) -1f else 1f
+                // Ear-tip pink, raised to sit inside the new triangular ear rather than the old round bump.
+                blush(Offset(side * 92f, -152f), 30f, 0.49f * solid)
+                blush(Offset(side * 100f, -6f), 54f, 0.65f * solid)
+            }
         }
 
         // The fish, napping. Face details: a dot eye near the nose, a little gill arc, a ring spot.
