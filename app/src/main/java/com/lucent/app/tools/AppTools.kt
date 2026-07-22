@@ -715,13 +715,13 @@ object AppTools {
                 // the composer's own mode toggle.
                 val checklistJson = Checklist.addAll("[]", args.optString("checklist", ""))
                 val isChecklist = checklistJson != "[]"
-                db.noteDao().insert(
+                val newNoteId = db.noteDao().insert(
                     Note(title = title, body = body, tags = tags, isChecklist = isChecklist, checklist = checklistJson)
                 )
                 val suffix = Checklist.progress(checklistJson)?.let { (_, total) ->
                     " as a checklist with $total item${if (total == 1) "" else "s"}"
                 } ?: ""
-                ToolExecResult("Created note \"$title\"$suffix.")
+                ToolExecResult("Created note \"$title\"$suffix.", openNoteId = newNoteId)
             }
 
             "list_notes" -> {
@@ -781,7 +781,7 @@ object AppTools {
                     // Records the outgoing text as a revision before overwriting it — so an edit made
                     // by asking is exactly as recoverable as one made by typing.
                     TaskActions.updateNoteWithHistory(db, match, updated)
-                    ToolExecResult("Updated note \"${updated.title}\". Its previous version was saved to history.")
+                    ToolExecResult("Updated note \"${updated.title}\". Its previous version was saved to history.", openNoteId = match.id)
                 }
             }
 
@@ -1126,7 +1126,7 @@ object AppTools {
                 } else {
                     ""
                 }
-                ToolExecResult("Created task \"$title\"$suffix.$warning")
+                ToolExecResult("Created task \"$title\"$suffix.$warning", openTaskId = newId)
             }
 
             "list_tasks" -> {
@@ -1258,7 +1258,7 @@ object AppTools {
                     } else {
                         ""
                     }
-                    ToolExecResult("Updated task \"${updated.title}\".$warning")
+                    ToolExecResult("Updated task \"${updated.title}\".$warning", openTaskId = match.id)
                 }
             }
 
