@@ -284,6 +284,17 @@ fun AssistantScreen(active: Boolean = true) {
         } else ""
     val shownError = if (controllerError.isNotBlank()) controllerError else localError
 
+    // The "set up an API or import a local model" hint is a nudge for the current visit, not a
+    // standing banner. On Android, KeepAliveTabs keeps this screen composed across tab switches,
+    // so plain `remember` state — rightly kept alive for the draft input — also keeps this hint
+    // alive: it would still be sitting there the next time the tab was opened. Clear it the
+    // moment the screen stops being the active tab, so coming back starts clean. (On desktop the
+    // `when` host disposes the screen on switch, which resets it anyway; `active` simply never
+    // goes false there today.)
+    LaunchedEffect(active) {
+        if (!active) localError = ""
+    }
+
     DisposableEffect(Unit) {
         onDispose { AssistantController.clearError() }
     }
