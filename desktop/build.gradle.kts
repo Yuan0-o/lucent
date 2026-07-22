@@ -52,15 +52,15 @@ dependencies {
     // The shared code (ApiProfiles, AppLock, BackupManager, …) uses org.json.JSONObject throughout.
     implementation("org.json:json:20240303")
 
-    // SQLite JDBC driver. Was io.github.willena:sqlite-jdbc (bundles SQLite3MultipleCiphers, i.e.
-    // SQLCipher-compatible encryption) — but that exact version failed to resolve in CI, so this is
-    // pinned to the canonical org.xerial build, which is guaranteed on Maven Central. Db.kt's
-    // applyEncryption() already degrades gracefully to an UNENCRYPTED store when the cipher PRAGMAs
-    // aren't available (which is the case here), so the desktop DB works but is not encrypted at rest.
-    // To restore encryption parity with Android, swap this one line back to a *resolvable* willena
-    // release — check https://central.sonatype.com/artifact/io.github.willena/sqlite-jdbc for a
-    // current version — and no code change is needed.
-    implementation("org.xerial:sqlite-jdbc:3.45.1.0")
+    // SQLite JDBC driver — io.github.willena:sqlite-jdbc, the drop-in Xerial build whose SQLite
+    // core is SQLite3MultipleCiphers, i.e. it speaks the SQLCipher scheme Db.kt keys with. This is
+    // what makes the desktop database encrypted at rest, restoring parity with Android; Db.kt also
+    // migrates a database created by the earlier (unencrypted, org.xerial) builds in place on first
+    // open. If THIS exact version ever fails to resolve, do not fall back to org.xerial — that
+    // silently ships an unencrypted store; instead pick another release from
+    // https://central.sonatype.com/artifact/io.github.willena/sqlite-jdbc (3.44.1.0, 3.46.1.3 and
+    // 3.49.1.0 are other lines that have shipped) — the Db.kt code path is identical for all of them.
+    implementation("io.github.willena:sqlite-jdbc:3.45.1.6")
 
     // PDF export and in-app PDF attachment preview (replaces Android's PdfRenderer with PDFBox).
     implementation("org.apache.pdfbox:pdfbox:3.0.3")
