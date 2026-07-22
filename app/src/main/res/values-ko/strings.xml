@@ -12,4 +12,17 @@
     <string name="widget_no_pinned_note">고정된 노트 없음</string>
     <string name="widget_untitled">제목 없음</string>
     <string name="widget_untitled_task">제목 없는 할 일</string>
+
+    <string name="widget_label_new_task">작업 추가</string>
+    <string name="widget_label_new_note">노트 추가</string>
+    <string name="widget_label_assistant">어시스턴트</string>
+    <string name="widget_label_progress">작업 진행률</string>
+    <string name="widget_label_quick">빠른 작업</string>
+    <string name="widget_label_today">작업 목록</string>
+    <string name="widget_label_pinned">고정 노트</string>
+    <string name="widget_ask_hint">무엇이든 물어보세요…</string>
+    <string name="widget_all_done">모두 완료 ✨</string>
+    <string name="widget_next_fmt">다음: %1$s</string>
+    <string name="widget_a11y_mark_done">완료로 표시</string>
+    <string name="widget_a11y_reopen">미완료로 되돌리기</string>
 </resources>
