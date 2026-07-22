@@ -27,6 +27,11 @@ object WidgetActions {
     const val OPEN_TASK_ITEM = "open_task_item"
     const val OPEN_NOTE_ITEM = "open_note_item"
 
+    // The quick-complete check on a tasks-list row (this round): opens the in-app confirmation
+    // dialog for that task rather than flipping anything directly — a widget tap gets exactly the
+    // same "ask first" treatment as every other action in this app.
+    const val TOGGLE_TASK_ITEM = "toggle_task_item"
+
     /** Extra carrying the row id for [OPEN_TASK_ITEM] / [OPEN_NOTE_ITEM]. */
     const val EXTRA_ID = "com.lucent.app.widget.EXTRA_ID"
 
@@ -72,9 +77,11 @@ object WidgetActions {
      * safe on modern Android because the intent is explicit (its component is our own activity).
      */
     fun taskListTemplate(context: Context): PendingIntent {
+        // Deliberately carries NO EXTRA_ACTION of its own: a row now has two tap targets (the row
+        // body opens the task, the check asks to complete it), so each fill-in intent supplies
+        // both the action and the id, and the template stays neutral between them.
         val intent = Intent(context, MainActivity::class.java).apply {
             this.action = Intent.ACTION_MAIN
-            putExtra(EXTRA_ACTION, OPEN_TASK_ITEM)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
