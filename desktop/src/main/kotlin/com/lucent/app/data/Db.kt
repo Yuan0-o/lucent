@@ -94,10 +94,36 @@ class Db private constructor(private val connection: Connection) {
             return Db(conn)
         }
 
+        /** The 16-byte header every UNENCRYPTED SQLite file starts with; an encrypted page 1 never has it. */
+        private val PLAINTEXT_HEADER = "SQLite format 3\u0000".toByteArray(Charsets.ISO_8859_1)
+
+        /** True when [file] exists and carries the plain-SQLite header — i.e. a legacy unencrypted store. */
+        private fun isPlaintextDatabase(file: File): Boolean {
+            if (!file.exists() || file.length() < PLAINTEXT_HEADER.size) return false
+            val head = ByteArray(PLAINTEXT_HEADER.size)
+            file.inputStream().use { if (it.read(head) != head.size) return false }
+            return head.contentEquals(PLAINTEXT_HEADER)
+        }
+
         /**
          * Key the connection with the SQLCipher-compatible raw key before anything reads or writes.
-         * A wrong key (or a database written with a different key) surfaces on the probe query as a
-         * "file is not a database" error, which we rethrow with a message a person can act on.
+         *
+         * Three cases, told apart by the FILE HEADER before any key is applied — a plaintext SQLite
+         * file always begins "SQLite format 3\0", an encrypted one never does:
+         *
+         *  1. **Fresh or already-encrypted file** — set the cipher pragmas and the key; a probe that
+         *     still fails means a genuinely wrong key (the header already ruled out "it's plaintext"),
+         *     which is rethrown with a message a person can act on.
+         *  2. **Legacy plaintext file** — written by the earlier desktop builds that shipped the plain
+         *     org.xerial driver. Encrypted IN PLACE, once, silently: leave WAL (rekey refuses a WAL
+         *     database, and every prior run left it in WAL), set the cipher shape, then `PRAGMA rekey`
+         *     — SQLite3MultipleCiphers encrypts an unencrypted database in place on rekey. Data is
+         *     never copied out, exported, or set aside; a failed rekey degrades to the old unencrypted
+         *     behaviour with a loud [StartupLog] line rather than stranding the store.
+         *  3. **No cipher core** (a plain driver swapped back in) — detected up front via
+         *     `PRAGMA cipher_version`, the one probe stock SQLite cannot fake (it silently ignores
+         *     unknown pragmas, so merely "accepting" the key statements proves nothing) — degrade to
+         *     unencrypted with a loud log line, exactly as before.
          */
         private fun applyEncryption(context: Context, conn: Connection, file: File) {
             val passphrase = try {
@@ -106,22 +132,55 @@ class Db private constructor(private val connection: Connection) {
                 StartupLog.event(context, "db: key unavailable (${t.message}); opening unencrypted")
                 return
             }
+            val legacyPlaintext = isPlaintextDatabase(file)
+            // Establish that the cipher core is actually present before claiming anything. Stock
+            // SQLite silently IGNORES unknown PRAGMAs, so a plain driver would "accept" every
+            // statement below while writing plaintext. The one probe a plain driver cannot fake is
+            // cipher_version, which only SQLite3MultipleCiphers answers with a value.
+            val cipherAvailable = try {
+                conn.createStatement().use { st ->
+                    st.executeQuery("PRAGMA cipher_version").use { rs -> rs.next() && !rs.getString(1).isNullOrBlank() }
+                }
+            } catch (t: Throwable) {
+                false
+            }
+            if (!cipherAvailable) {
+                StartupLog.event(context, "db: driver has no cipher core; opening UNENCRYPTED")
+                return
+            }
             val cipherReady = try {
                 conn.createStatement().use { st ->
+                    if (legacyPlaintext) {
+                        // rekey refuses WAL, and prior (unencrypted) runs always left WAL on. The
+                        // plaintext file opens fine without a key, so switch the journal first —
+                        // this also checkpoints any leftover -wal from the last unencrypted run.
+                        st.execute("PRAGMA journal_mode=DELETE")
+                    }
                     st.execute("PRAGMA cipher='sqlcipher'")
                     st.execute("PRAGMA legacy=4")
-                    // The x'..' raw-key form skips the KDF, same as SQLCipher on Android.
-                    st.execute("PRAGMA key=\"$passphrase\"")
+                    if (legacyPlaintext) {
+                        // The x'..' raw-key form skips the KDF, same as SQLCipher on Android.
+                        st.execute("PRAGMA rekey=\"$passphrase\"")
+                    } else {
+                        st.execute("PRAGMA key=\"$passphrase\"")
+                    }
                 }
                 true
             } catch (t: Throwable) {
-                StartupLog.event(context, "db: cipher pragmas unavailable (${t.message}); opening unencrypted")
+                StartupLog.event(context, "db: keying failed (${t.message}); opening unencrypted")
                 false
             }
             if (!cipherReady) return
             try {
                 conn.createStatement().use { it.executeQuery("SELECT count(*) FROM sqlite_master").close() }
+                if (legacyPlaintext) StartupLog.event(context, "db: legacy unencrypted database encrypted in place")
             } catch (t: Throwable) {
+                if (legacyPlaintext) {
+                    // The one-time in-place encryption didn't take on this driver. Never strand the
+                    // data: fall back to exactly what every previous build did (plaintext), loudly.
+                    StartupLog.event(context, "db: in-place encryption failed (${t.message}); opening unencrypted")
+                    return
+                }
                 throw IllegalStateException(
                     "The Lucent database at ${file.absolutePath} could not be unlocked with this " +
                         "machine's key. If the key files under ${File(context.filesDir, "keys")} were " +
