@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- User-resizable from 1x1 up to 4x2 (this round's widget task). minResize allows the 1x1 floor,
+     maxResize caps the ceiling on launchers that honour it, targetCell is the default drop size,
+     and previewImage is what EVERY launcher (including ones that ignore previewLayout) shows in
+     the picker — a miniature of the widget itself, never the app icon. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="40dp"
     android:minHeight="40dp"
     android:minResizeWidth="40dp"
     android:minResizeHeight="40dp"
-    android:targetCellWidth="1"
+    android:maxResizeWidth="306dp"
+    android:maxResizeHeight="140dp"
+    android:targetCellWidth="3"
     android:targetCellHeight="1"
     android:updatePeriodMillis="0"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen"
+    android:previewImage="@drawable/preview_assistant"
     android:previewLayout="@layout/widget_assistant"
     android:initialLayout="@layout/widget_assistant" />
