@@ -109,23 +109,38 @@ jobs:
           # unset and the GPU-engine build below skips itself; the CPU engine still ships.
           $ErrorActionPreference = 'Continue'
           try {
-            $installer = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
-            $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/VulkanSDK-$env:VULKAN_VERSION-Installer.exe"
-            # -f makes curl FAIL on an HTTP error (e.g. the pinned version was unpublished -> 404)
-            # instead of silently saving the error page as the .exe. That bogus file was exactly why
-            # Start-Process reported "not a valid application for this OS platform" and exited 1.
-            curl.exe -fSL -o $installer $url
-            if ($LASTEXITCODE -ne 0) { throw "download failed (curl exit $LASTEXITCODE) - the pinned SDK version may no longer be published" }
-            # A real Windows installer is a PE binary and starts with the bytes 'MZ' (0x4D 0x5A);
-            # an HTML error page saved as .exe does not. Verify before we try to run it.
-            $magic = Get-Content -Path $installer -AsByteStream -TotalCount 2 -ErrorAction Stop
-            if ($magic.Count -lt 2 -or $magic[0] -ne 0x4D -or $magic[1] -ne 0x5A) {
-              throw "downloaded file is not a Windows executable (missing 'MZ' header)"
+            # One attempt at one specific version, throwing on every way it can go wrong.
+            function Install-VulkanSdk([string]$ver) {
+              $installer = "$env:RUNNER_TEMP\VulkanSDK-$ver-Installer.exe"
+              $url = "https://sdk.lunarg.com/sdk/download/$ver/windows/VulkanSDK-$ver-Installer.exe"
+              # -f makes curl FAIL on an HTTP error (e.g. an unpublished version -> 404) instead
+              # of silently saving the error page as the .exe. That bogus file was exactly why
+              # Start-Process reported "not a valid application for this OS platform" and exited 1.
+              curl.exe -fSL -o $installer $url
+              if ($LASTEXITCODE -ne 0) { throw "download failed (curl exit $LASTEXITCODE)" }
+              # A real Windows installer is a PE binary and starts with the bytes 'MZ' (0x4D 0x5A);
+              # an HTML error page saved as .exe does not. Verify before we try to run it.
+              $magic = Get-Content -Path $installer -AsByteStream -TotalCount 2 -ErrorAction Stop
+              if ($magic.Count -lt 2 -or $magic[0] -ne 0x4D -or $magic[1] -ne 0x5A) {
+                throw "downloaded file is not a Windows executable (missing 'MZ' header)"
+              }
+              $proc = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -ErrorAction Stop
+              if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
+              "VULKAN_SDK=C:\VulkanSDK\$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host "Vulkan SDK $ver installed."
             }
-            $proc = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -ErrorAction Stop
-            if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
-            "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            Write-Host "Vulkan SDK $env:VULKAN_VERSION installed."
+            # The pin comes first for reproducibility — but LunarG takes old installers down
+            # (the 2026-07-22 run got a plain 404 for the pinned build), and a vanished pin
+            # shouldn't cost us the GPU engine when a perfectly good current SDK is one query
+            # away: vulkan.lunarg.com/sdk/latest/windows.txt answers with its version string.
+            try {
+              Install-VulkanSdk $env:VULKAN_VERSION
+            } catch {
+              Write-Warning "Pinned Vulkan SDK $env:VULKAN_VERSION unavailable ($($_.Exception.Message)); asking LunarG for the current latest instead."
+              $latest = (curl.exe -fsSL "https://vulkan.lunarg.com/sdk/latest/windows.txt")
+              if ($LASTEXITCODE -ne 0 -or -not $latest) { throw "could not resolve the latest SDK version" }
+              Install-VulkanSdk $latest.Trim()
+            }
           } catch {
             Write-Warning "Vulkan SDK unavailable ($($_.Exception.Message)); skipping the GPU engine build. The CPU engine still ships."
           }
@@ -177,6 +192,38 @@ jobs:
           }
 
       # ---- WiX, required by jpackage to build a Windows .exe installer ----
+      # ---- Surface which engines actually made it into this build ----
+      # A green run used to be silent about the one thing worth knowing here: whether the
+      # best-effort GPU engine is in the installer, or the Vulkan chain quietly fell through
+      # (as it did on 2026-07-22, when the pinned SDK download 404'd and the app shipped
+      # CPU-only without a word). This step puts the answer on the run's summary page and
+      # raises a yellow annotation when the GPU engine is missing, so nobody has to spelunk
+      # step logs to learn what shipped.
+      - name: Report bundled engines
+        shell: pwsh
+        run: |
+          $dir = "desktop/src/main/resources/native"
+          $rows = @()
+          foreach ($name in "lucent_llama.dll","lucent_llama_vk.dll","lucent_native.dll") {
+            $f = Join-Path $dir $name
+            if (Test-Path $f) {
+              $kb = [math]::Round((Get-Item $f).Length / 1kb)
+              $rows += "| $name | bundled | $kb KB |"
+            } else {
+              $rows += "| $name | absent | - |"
+            }
+          }
+          $summary = @("### Engines in this installer", "", "| DLL | Status | Size |", "|---|---|---|") + $rows
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          if (Test-Path (Join-Path $dir "lucent_llama_vk.dll")) {
+            Write-Host "::notice title=GPU engine bundled::lucent_llama_vk.dll is in this installer - the in-app GPU switch has a real backend on Vulkan-capable machines."
+          } else {
+            Write-Host "::warning title=GPU engine missing::lucent_llama_vk.dll was NOT produced - this installer is CPU-only and the in-app GPU switch will silently fall back. Check the 'Install Vulkan SDK' and 'Build lucent_llama_vk.dll' steps above."
+          }
+          if (-not (Test-Path (Join-Path $dir "lucent_llama.dll"))) {
+            Write-Host "::warning title=CPU engine missing::lucent_llama.dll was NOT produced - local models will be unavailable in this build."
+          }
+
       - name: Install WiX
         shell: pwsh
         run: choco install wixtoolset -y --no-progress
