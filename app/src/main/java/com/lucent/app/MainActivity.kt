@@ -101,6 +101,7 @@ import com.lucent.app.ui.rememberCyclingPaletteColors
 import com.lucent.app.ui.SettingsScreen
 import com.lucent.app.ui.ShareIntake
 import com.lucent.app.ui.ShareIntakeDialog
+import com.lucent.app.ui.WidgetTaskConfirmDialog
 import com.lucent.app.ui.TasksScreen
 import com.lucent.app.ui.UnsavedChangesGuard
 import com.lucent.app.widget.WidgetActions
@@ -466,6 +467,15 @@ class MainActivity : FragmentActivity() {
                 val id = intent.getLongExtra(WidgetActions.EXTRA_ID, -1L)
                 if (id > 0) AppNavigation.openTask(id) else AppNavigation.requestScreen(Screen.Tasks)
             }
+            // The quick-complete check on a tasks-list row: confirmation-first, like every other
+            // action in this app. The id is parked in WidgetTaskConfirm; the dialog hosted below
+            // asks, and only a Confirm actually completes (or reopens) the task. The Tasks tab is
+            // brought up behind the dialog so the question has its context.
+            WidgetActions.TOGGLE_TASK_ITEM -> {
+                val id = intent.getLongExtra(WidgetActions.EXTRA_ID, -1L)
+                if (id > 0) com.lucent.app.ui.WidgetTaskConfirm.offer(id)
+                AppNavigation.requestScreen(Screen.Tasks)
+            }
             WidgetActions.OPEN_NOTE_ITEM -> {
                 val id = intent.getLongExtra(WidgetActions.EXTRA_ID, -1L)
                 if (id > 0) AppNavigation.openNote(id) else AppNavigation.requestScreen(Screen.Notes)
@@ -811,6 +821,7 @@ fun LucentApp(paletteColors: List<Color>, backdropColor: Color, backgroundAnimat
             // A share sent into Lucent (task 6) surfaces here as a small "note or task?" chooser,
             // layered above whatever screen is showing. It's a no-op unless something was shared.
             ShareIntakeDialog()
+            WidgetTaskConfirmDialog()
         }
     }
 }
