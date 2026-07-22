@@ -84,8 +84,7 @@ class Db private constructor(private val connection: Connection) {
             file.parentFile?.mkdirs()
             // Load the driver class explicitly so a missing dependency fails with a clear message.
             Class.forName("org.sqlite.JDBC")
-            val conn = DriverManager.getConnection("jdbc:sqlite:${file.absolutePath}")
-            applyEncryption(context, conn, file)
+            val conn = openConnection(context, file)
             conn.createStatement().use { st ->
                 st.execute("PRAGMA journal_mode=WAL")
                 st.execute("PRAGMA foreign_keys=ON")
@@ -106,100 +105,98 @@ class Db private constructor(private val connection: Connection) {
         }
 
         /**
-         * Key the connection with the SQLCipher-compatible raw key before anything reads or writes.
+         * Open the JDBC connection with at-rest encryption in force.
          *
-         * Three cases, told apart by the FILE HEADER before any key is applied — a plaintext SQLite
-         * file always begins "SQLite format 3\0", an encrypted one never does:
+         * The hard-won rule (CI red of 2026-07-22 09:05): this driver's connection constructor runs
+         * `SQLiteConfig.apply` — a batch of init pragmas — the moment the file opens, and preparing
+         * the first of them against an encrypted database already dies with SQLITE_NOTADB. A key
+         * applied by a post-connect `PRAGMA key` therefore arrives TOO LATE for any database that
+         * is already encrypted; it only ever worked for brand-new files. The key must travel IN THE
+         * URL: SQLite3MultipleCiphers reads its `cipher`, `legacy`, and `hexkey` URI parameters
+         * during open itself, so page 1 is decryptable before the driver's own pragmas run — see
+         * [keyedSqliteUrl], which the CI gate (CipherSelfCheck) shares, so the build proves the
+         * exact mechanism the app uses.
          *
-         *  1. **Fresh or already-encrypted file** — set the cipher pragmas and the key; a probe that
-         *     still fails means a genuinely wrong key (the header already ruled out "it's plaintext"),
-         *     which is rethrown with a message a person can act on.
-         *  2. **Plaintext file** — written by a pre-release build from the brief org.xerial era.
-         *     Nothing was ever published, so a plaintext file here can only be a developer's own
-         *     working data. Encrypted IN PLACE, once, silently: leave WAL (rekey refuses a WAL
-         *     database, and every prior run left it in WAL), set the cipher shape, then `PRAGMA rekey`
-         *     — SQLite3MultipleCiphers encrypts an unencrypted database in place on rekey. Data is
-         *     never copied out, exported, or set aside; a failed rekey degrades to the old unencrypted
-         *     behaviour with a loud [StartupLog] line rather than stranding the store.
-         *  3. **Cipher-core diagnostics** — [probeCipherCore] tries to positively identify
-         *     SQLite3MultipleCiphers up front, but its verdict only shapes the LOG LINES, never the
-         *     behaviour: the keying statements are attempted regardless (on a plain driver they are
-         *     silent no-ops — stock SQLite ignores unknown pragmas — so attempting them is always
-         *     safe), and an unidentified core is announced loudly so nobody mistakes a plaintext
-         *     store for an encrypted one. The CI gate (CipherSelfCheck) shares this exact probe and
-         *     then proves the truth functionally: header scrambled, right key reads, wrong key
-         *     rejected.
+         * Cases, told apart by the FILE HEADER before anything opens — a plaintext SQLite file
+         * always begins "SQLite format 3\0", an encrypted one never does:
+         *
+         *  1. **Fresh or already-encrypted file** — open with the keyed URL. A connect failure on
+         *     an EXISTING file means a genuinely wrong key (the header already ruled out "it's
+         *     plaintext"), rethrown with a message a person can act on; a brand-new file failing to
+         *     CREATE is a driver problem, not a key problem, and is surfaced raw.
+         *  2. **Plaintext file** — written by a pre-release build from the brief org.xerial era;
+         *     nothing was ever published, so it can only be a developer's own working data. Opened
+         *     plain (a keyed open would refuse it), then encrypted IN PLACE, once, silently: leave
+         *     WAL (rekey refuses a WAL database), set the cipher shape, then `PRAGMA rekey`. Data
+         *     is never copied out or set aside; a failed rekey degrades to plaintext with a loud
+         *     [StartupLog] line rather than stranding the store.
+         *  3. **Diagnostics** — [probeCipherCore] identifies the cipher core for the LOG LINES
+         *     only; behaviour never depends on it. An unidentified core, or a header still
+         *     plaintext after a rekey, is announced loudly so nobody mistakes a plaintext store
+         *     for an encrypted one.
          */
-        private fun applyEncryption(context: Context, conn: Connection, file: File) {
+        private fun openConnection(context: Context, file: File): Connection {
             val passphrase = try {
                 DataKeys.databasePassphrase(context) // "x'<64 hex>'"
             } catch (t: Throwable) {
                 StartupLog.event(context, "db: key unavailable (${t.message}); opening unencrypted")
-                return
+                return DriverManager.getConnection("jdbc:sqlite:${file.absolutePath}")
             }
-            val legacyPlaintext = isPlaintextDatabase(file)
-            // Diagnostics only — see the KDoc. The 2026-07-22 08:36 CI run proved the previous
-            // version of this check wrong twice over: `PRAGMA cipher_version` is SQLCipher's word,
-            // not SQLite3MultipleCiphers', and this driver's executeQuery THROWS on a statement
-            // that returns no columns rather than handing back an empty result set — so the old
-            // probe condemned the real cipher driver as "no cipher core" and would have silently
-            // opened the store unencrypted. The multi-vocabulary probe lives in [probeCipherCore]
-            // and is shared with the CI self-check, so CI exercises exactly this code.
-            val core = probeCipherCore(conn)
-            val cipherReady = try {
-                conn.createStatement().use { st ->
-                    if (legacyPlaintext) {
-                        // rekey refuses WAL, and prior (unencrypted) runs always left WAL on. The
-                        // plaintext file opens fine without a key, so switch the journal first —
-                        // this also checkpoints any leftover -wal from the last unencrypted run.
+            val hexKey = passphrase.removePrefix("x'").removeSuffix("'")
+            if (!hexKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+                StartupLog.event(context, "db: key had an unexpected form; opening unencrypted")
+                return DriverManager.getConnection("jdbc:sqlite:${file.absolutePath}")
+            }
+
+            if (isPlaintextDatabase(file)) {
+                // Case 2: pre-release plaintext store — open plain, encrypt in place, keep going.
+                val conn = DriverManager.getConnection("jdbc:sqlite:${file.absolutePath}")
+                val core = probeCipherCore(conn)
+                val rekeyed = try {
+                    conn.createStatement().use { st ->
+                        // rekey refuses WAL, and prior (unencrypted) runs always left WAL on;
+                        // switching first also checkpoints any leftover -wal file.
                         st.execute("PRAGMA journal_mode=DELETE")
-                    }
-                    st.execute("PRAGMA cipher='sqlcipher'")
-                    st.execute("PRAGMA legacy=4")
-                    if (legacyPlaintext) {
-                        // The x'..' raw-key form skips the KDF, same as SQLCipher on Android.
+                        st.execute("PRAGMA cipher='sqlcipher'")
+                        st.execute("PRAGMA legacy=4")
                         st.execute("PRAGMA rekey=\"$passphrase\"")
-                    } else {
-                        st.execute("PRAGMA key=\"$passphrase\"")
                     }
-                }
-                true
-            } catch (t: Throwable) {
-                StartupLog.event(context, "db: keying failed (${t.message}); opening unencrypted")
-                false
-            }
-            if (!cipherReady) return
-            try {
-                conn.createStatement().use { it.executeQuery("SELECT count(*) FROM sqlite_master").close() }
-            } catch (t: Throwable) {
-                if (legacyPlaintext) {
-                    // The one-time in-place encryption didn't take on this driver. Never strand the
-                    // data: fall back to exactly what every previous build did (plaintext), loudly.
+                    conn.createStatement().use { it.executeQuery("SELECT count(*) FROM sqlite_master").close() }
+                    true
+                } catch (t: Throwable) {
                     StartupLog.event(context, "db: in-place encryption failed (${t.message}); opening unencrypted")
-                    return
+                    false
                 }
-                throw IllegalStateException(
+                when {
+                    !rekeyed -> Unit // already logged; the data stays reachable, exactly as before
+                    core == null ->
+                        StartupLog.event(context, "db: cipher core NOT identified by any probe — at-rest encryption may not be active on this driver")
+                    else ->
+                        StartupLog.event(context, "db: pre-release plaintext database encrypted in place ($core)")
+                }
+                if (rekeyed && core != null && isPlaintextDatabase(file)) {
+                    StartupLog.event(context, "db: WARNING — file header still plaintext after rekey; encryption did NOT engage")
+                }
+                return conn
+            }
+
+            // Case 1: fresh file, or an existing encrypted store — the key rides the URL.
+            val existed = file.exists()
+            val conn = try {
+                DriverManager.getConnection(keyedSqliteUrl(file, hexKey))
+            } catch (t: Throwable) {
+                if (existed) throw IllegalStateException(
                     "The Lucent database at ${file.absolutePath} could not be unlocked with this " +
                         "machine's key. If the key files under ${File(context.filesDir, "keys")} were " +
-                        "deleted or replaced, restore from a .lcb backup." +
-                        (if (core == null) " (This build's SQLite driver also failed the cipher-core " +
-                            "probe - if the dependency in desktop/build.gradle.kts was ever swapped " +
-                            "off the willena build, that, not the key, is the culprit.)" else ""), t
+                        "deleted or replaced, restore from a .lcb backup.", t
                 )
+                throw t
             }
-            // Truth-telling, in descending order of confidence. The header re-check is the belt:
-            // page 1 sits at the front of the file, so after a successful in-place rekey it must no
-            // longer read as plaintext. A brand-new file is still 0 bytes at this point (the schema
-            // lands after this returns), so the belt simply doesn't fire for fresh databases.
-            when {
-                core == null ->
-                    StartupLog.event(context, "db: cipher core NOT identified by any probe — at-rest encryption may not be active on this driver")
-                legacyPlaintext ->
-                    StartupLog.event(context, "db: legacy unencrypted database encrypted in place ($core)")
+            val core = probeCipherCore(conn)
+            if (core == null) {
+                StartupLog.event(context, "db: cipher core NOT identified by any probe — at-rest encryption may not be active on this driver")
             }
-            if (core != null && isPlaintextDatabase(file)) {
-                StartupLog.event(context, "db: WARNING — file header still plaintext after keying; encryption did NOT engage")
-            }
+            return conn
         }
 
         /**
@@ -287,7 +284,7 @@ class Db private constructor(private val connection: Connection) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cipher-core probe — shared by Db.applyEncryption (for its log lines) and the CI gate
+// Cipher-core probe — shared by Db.openConnection (for its log lines) and the CI gate
 // (com.lucent.desktop.CipherSelfCheck), so the build verifies the exact probe the app runs.
 // ---------------------------------------------------------------------------------------------
 
@@ -303,6 +300,20 @@ class Db private constructor(private val connection: Connection) {
  * result is "unidentified", not proof of absence — callers treat it as a reason to WARN, never as
  * a reason to skip the keying attempt (which is a harmless no-op on a plain driver).
  */
+/**
+ * The JDBC URL that hands SQLite3MultipleCiphers its key AT OPEN TIME, before the driver's own
+ * init pragmas run (`SQLiteConfig.apply` prepares statements during the connection constructor —
+ * the 2026-07-22 09:05 CI red). `hexkey` takes the raw 64-hex key without quoting acrobatics;
+ * `cipher`/`legacy` pin the SQLCipher-compatible on-disk shape, matching Android. The path is
+ * percent-encoded just enough for SQLite's URI parser (%, ?, #, and spaces), and backslashes
+ * become the forward slashes URIs expect. Shared by Db and the CI gate so both key identically.
+ */
+internal fun keyedSqliteUrl(file: File, hexKey: String): String {
+    val p = file.absolutePath.replace('\\', '/')
+        .replace("%", "%25").replace("?", "%3F").replace("#", "%23").replace(" ", "%20")
+    return "jdbc:sqlite:file:$p?cipher=sqlcipher&legacy=4&hexkey=$hexKey"
+}
+
 internal fun probeCipherCore(conn: Connection): String? {
     val probes = arrayOf(
         "SELECT sqlite3mc_version()", // the MC core's own SQL function
