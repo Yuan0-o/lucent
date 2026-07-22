@@ -278,9 +278,13 @@ object WebSearchClient {
         }
     }
 
+    // Compiled once — cleanText runs on the title and snippet of every result of every search.
+    private val HTML_TAG = Regex("<[^>]+>")
+    private val WS_RUN = Regex("\\s+")
+
     /** Strip HTML tags, decode the entities that actually show up, and collapse whitespace. */
     private fun cleanText(raw: String): String {
-        val noTags = raw.replace(Regex("<[^>]+>"), "")
+        val noTags = raw.replace(HTML_TAG, "")
         val decoded = noTags
             .replace("&amp;", "&")
             .replace("&lt;", "<")
@@ -290,6 +294,6 @@ object WebSearchClient {
             .replace("&#39;", "'")
             .replace("&#x2F;", "/")
             .replace("&nbsp;", " ")
-        return decoded.replace(Regex("\\s+"), " ").trim()
+        return decoded.replace(WS_RUN, " ").trim()
     }
 }
