@@ -182,6 +182,7 @@
              extra — no data crosses the boundary. -->
         <receiver
             android:name=".widget.NewNoteWidget"
+            android:label="@string/widget_label_new_note"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -193,6 +194,7 @@
 
         <receiver
             android:name=".widget.NewTaskWidget"
+            android:label="@string/widget_label_new_task"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -204,6 +206,7 @@
 
         <receiver
             android:name=".widget.AssistantWidget"
+            android:label="@string/widget_label_assistant"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -215,6 +218,7 @@
 
         <receiver
             android:name=".widget.QuickActionsWidget"
+            android:label="@string/widget_label_quick"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -226,6 +230,7 @@
 
         <receiver
             android:name=".widget.TaskSummaryWidget"
+            android:label="@string/widget_label_progress"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -239,6 +244,7 @@
              active tasks (backed by the RemoteViewsService below) and a pinned-note preview. -->
         <receiver
             android:name=".widget.TodayTasksWidget"
+            android:label="@string/widget_label_today"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -250,6 +256,7 @@
 
         <receiver
             android:name=".widget.PinnedNoteWidget"
+            android:label="@string/widget_label_pinned"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
