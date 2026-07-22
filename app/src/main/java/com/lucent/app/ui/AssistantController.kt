@@ -1122,6 +1122,10 @@ object AssistantController {
 
         // Apply the CPU/GPU choice BEFORE loading. ensureLoaded reloads the model if the backend
         // changed since last time; a failed GPU load quietly falls back to CPU inside LocalLlm.
+        // useGpu was captured once, at send — so a Settings flip made while THIS reply streams
+        // changes nothing here and simply rides in with the next reply (LocalLlm.setGpuEnabled
+        // documents the full contract). Keep it a captured parameter; never re-read the setting
+        // from inside the turn.
         com.lucent.app.local.LocalLlm.setGpuEnabled(useGpu)
 
         // Load (or re-use) the model. First load of a multi-GB file takes real seconds; surface a

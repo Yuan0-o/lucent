@@ -2395,6 +2395,9 @@ fun SettingsScreen(active: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     lmConfirmGpuOn = false
+                    // Record-only by design: never call into LocalLlm from here. A reply that is
+                    // mid-generation keeps the backend it started on; the next send picks this
+                    // up (LocalLlm.setGpuEnabled documents the contract).
                     AppScope.io.launch { repo.setLocalGpuEnabled(true) }
                 }) { Text(S.lmWarnEnableAnyway) }
             },
@@ -2942,6 +2945,8 @@ fun SettingsScreen(active: Boolean = true) {
                                 checked = localGpuEnabled,
                                 onCheckedChange = { on ->
                                     if (on) lmConfirmGpuOn = true
+                                    // Turning OFF also only records: an in-flight reply (if any)
+                                    // finishes on the GPU and the next one loads on the CPU.
                                     else AppScope.io.launch { repo.setLocalGpuEnabled(false) }
                                 }
                             )
