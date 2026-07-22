@@ -69,7 +69,11 @@ data class ToolImage(val mime: String, val data: String, val name: String)
 data class ToolExecResult(
     val summary: String,
     val images: List<ToolImage> = emptyList(),
-    val success: Boolean = true
+    val success: Boolean = true,
+    // The row this tool created or edited, when it maps to one the app can open — how "approve and
+    // fine-tune in the editor" lands the user on the exact item (see AssistantConfirmationDialog).
+    val openNoteId: Long? = null,
+    val openTaskId: Long? = null
 )
 
 data class RawModelReply(
