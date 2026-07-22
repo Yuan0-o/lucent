@@ -92,6 +92,17 @@ object LocalLlm {
      * the desired backend; the next [ensureLoaded] notices the mismatch and reloads the model cleanly
      * on the chosen backend (no separate async unload, so there is no race with a concurrent load).
      * Cheap and idempotent when nothing changes.
+     *
+     * DELIBERATE CONTRACT — a flip made WHILE a reply is generating is silent and deferred: the
+     * in-flight reply keeps the backend it started on, and the change takes effect from the next
+     * reply. Three things uphold this, and all three must survive future edits:
+     *  1. This setter records a preference and nothing else — it must never stop, unload, or
+     *     reload anything.
+     *  2. A turn captures its choice once, at send: AssistantController receives useGpu as a
+     *     parameter and calls this exactly once, before its single ensureLoaded.
+     *  3. Every native call runs on [llmDispatcher]'s one thread, so even a stray ensureLoaded
+     *     from some future call site queues behind a running decode instead of swapping the
+     *     model out from under it.
      */
     fun setGpuEnabled(enabled: Boolean) {
         desiredGpuLayers = if (enabled) GPU_OFFLOAD_ALL else 0
