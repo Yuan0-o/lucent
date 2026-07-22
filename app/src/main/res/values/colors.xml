@@ -11,4 +11,9 @@
     <color name="widget_text">#FFFFFFFF</color>
     <color name="widget_text_muted">#B3FFFFFF</color>
     <color name="widget_accent">#FFC7B8F5</color>
+    <!-- The brand gradient the app icon wears, reused by the action widgets' cards. -->
+    <color name="widget_grad_start">#F2B79CF9</color>
+    <color name="widget_grad_end">#F2F0A9E4</color>
+    <color name="widget_chip">#42FFFFFF</color>
+    <color name="widget_track">#33FFFFFF</color>
 </resources>

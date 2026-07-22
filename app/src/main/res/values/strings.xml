@@ -18,4 +18,22 @@
     <string name="widget_no_pinned_note">No pinned note</string>
     <string name="widget_untitled">Untitled</string>
     <string name="widget_untitled_task">Untitled task</string>
+
+    <!-- Widget picker labels (this round): short FUNCTION names, never the app name, one per
+         widget, localized the classic res/values-* way because the launcher renders them. -->
+    <string name="widget_label_new_task">New task</string>
+    <string name="widget_label_new_note">New note</string>
+    <string name="widget_label_assistant">Assistant</string>
+    <string name="widget_label_progress">Task progress</string>
+    <string name="widget_label_quick">Quick actions</string>
+    <string name="widget_label_today">Task list</string>
+    <string name="widget_label_pinned">Pinned note</string>
+    <!-- On-widget texts for the redesigned four. -->
+    <string name="widget_ask_hint">Ask anything…</string>
+    <string name="widget_all_done">All done ✨</string>
+    <string name="widget_next_fmt">Next: %1$s</string>
+    <!-- Locale-neutral fraction, kept in base values only. -->
+    <string name="widget_fraction_fmt" translatable="false">%1$d / %2$d</string>
+    <string name="widget_a11y_mark_done">Mark as done</string>
+    <string name="widget_a11y_reopen">Mark as not done</string>
 </resources>
