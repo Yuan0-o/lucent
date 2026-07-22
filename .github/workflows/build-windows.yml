@@ -157,15 +157,52 @@ jobs:
                 if (Get-Installer "https://sdk.lunarg.com/sdk/download/latest/windows/$name" $installer) { $got = $true; break }
               }
             }
-            if (-not $got) { throw "no candidate URL yielded an installer - see the attempts above" }
-            $proc = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -ErrorAction Stop
-            if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
-            # Don't assume the directory name from the version string we asked for: an alias
-            # download installs whatever version it actually is. Export the SDK dir that exists.
-            $sdkDir = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction Stop | Sort-Object Name -Descending | Select-Object -First 1
-            if (-not $sdkDir) { throw "installer succeeded but C:\VulkanSDK contains no SDK directory" }
-            "VULKAN_SDK=$($sdkDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            Write-Host "Vulkan SDK $($sdkDir.Name) installed at $($sdkDir.FullName)."
+            $sdkPath = $null
+            if ($got) {
+              $proc = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -ErrorAction Stop
+              if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
+              # Don't assume the directory name from the version string we asked for: an alias
+              # download installs whatever version it actually is. Export the SDK dir that exists.
+              $dir = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction Stop | Sort-Object Name -Descending | Select-Object -First 1
+              if (-not $dir) { throw "installer succeeded but C:\VulkanSDK contains no SDK directory" }
+              $sdkPath = $dir.FullName
+              Write-Host "Vulkan SDK $($dir.Name) installed at $sdkPath."
+            } else {
+              # ---- Plan B: LunarG is unreachable, so assemble a minimal SDK ourselves. ----
+              # The GPU-engine build reads exactly three things out of VULKAN_SDK (via FindVulkan):
+              #   Include\vulkan (+ spirv)  <- KhronosGroup/Vulkan-Headers (+ SPIRV-Headers)
+              #   Lib\vulkan-1.lib          <- the import library, built from KhronosGroup/Vulkan-Loader
+              #   Bin\glslc.exe             <- the shader compiler the runner's preinstalled Android NDK ships
+              # None of that depends on LunarG's download site, and the produced DLL still merely
+              # IMPORTS the end user's own vulkan-1.dll at runtime, exactly like an official-SDK
+              # build — we ship no loader of our own.
+              Write-Warning "No LunarG installer URL worked; assembling a minimal Vulkan SDK from Khronos sources instead."
+              $mini = Join-Path $env:RUNNER_TEMP "vk-mini-sdk"
+              New-Item -ItemType Directory -Force -Path "$mini\Include","$mini\Lib","$mini\Bin" | Out-Null
+              $src = Join-Path $env:RUNNER_TEMP "vk-src"
+              git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers "$src\headers"
+              git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers "$src\spirv"
+              git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Loader "$src\loader"
+              foreach ($r in "headers","spirv","loader") { Write-Host ("  {0} @ {1}" -f $r, (git -C "$src\$r" rev-parse --short HEAD)) }
+              cmake -S "$src\headers" -B "$src\headers\b" | Out-Null
+              cmake --install "$src\headers\b" --prefix "$src\headers\out" | Out-Null
+              Copy-Item -Recurse -Force "$src\headers\out\include\*" "$mini\Include\"
+              Copy-Item -Recurse -Force "$src\spirv\include\spirv" "$mini\Include\"
+              cmake -S "$src\loader" -B "$src\loader\b" -A x64 -DVULKAN_HEADERS_INSTALL_DIR="$src\headers\out" -DBUILD_TESTS=OFF
+              cmake --build "$src\loader\b" --config Release --parallel
+              $lib = Get-ChildItem -Recurse -Path "$src\loader\b" -Filter vulkan-1.lib | Select-Object -First 1
+              if (-not $lib) { throw "Vulkan-Loader build produced no vulkan-1.lib" }
+              Copy-Item $lib.FullName "$mini\Lib\vulkan-1.lib" -Force
+              $ndkRoots = @($env:ANDROID_NDK_HOME, $env:ANDROID_NDK_ROOT, $env:ANDROID_NDK, $env:ANDROID_NDK_LATEST_HOME) | Where-Object { $_ }
+              if ($env:ANDROID_SDK_ROOT) { $ndkRoots += (Get-ChildItem "$env:ANDROID_SDK_ROOT\ndk" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object FullName) }
+              $glslc = $ndkRoots | ForEach-Object { Join-Path $_ "shader-tools\windows-x86_64\glslc.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+              if (-not $glslc) { throw "no glslc found in any preinstalled Android NDK (looked in: $($ndkRoots -join '; '))" }
+              Write-Host "using NDK glslc: $glslc"
+              Copy-Item $glslc "$mini\Bin\glslc.exe" -Force
+              $sdkPath = $mini
+              Write-Host "Minimal Vulkan SDK assembled at $sdkPath."
+            }
+            "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } catch {
             Write-Warning "Vulkan SDK unavailable ($($_.Exception.Message)); skipping the GPU engine build. The CPU engine still ships."
           }
