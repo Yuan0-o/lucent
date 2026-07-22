@@ -659,20 +659,35 @@ object AssistantController {
             }
             val ctx = AssistantController.appContextRef
             typewriterJob = AssistantController.genScope.launch {
+                // Within one epoch the buffer is strictly append-only (onDelta only appends, and
+                // every path that clears it also cancels this job first), so a copied-out String is
+                // always a valid prefix of the live buffer. The old loop did buffer.toString() on
+                // EVERY 16 ms beat — a full copy of the entire reply-so-far, 60×/s. On a long reply
+                // whose stream has finished but whose reveal is still catching up (the common case
+                // for a wall of text), that was a fresh full copy per beat for the whole remainder
+                // of the reveal: O(beats × length) character copying and steady GC churn during the
+                // most animation-heavy moment the app has. Now the buffer is re-copied only when it
+                // has actually GROWN past the snapshot — i.e. at the network's chunk rate while
+                // streaming, and exactly once after the stream ends. The per-beat substring for the
+                // visible prefix remains, as Compose state needs an immutable String.
+                var snapshot = ""
                 while (isActive) {
-                    val text = synchronized(lock) { buffer.toString() }
-                    val len = text.length
-                    if (shown >= len) {
+                    val bufLen = synchronized(lock) { buffer.length }
+                    if (shown >= bufLen) {
                         delay(16); continue
                     }
+                    if (snapshot.length < bufLen) {
+                        snapshot = synchronized(lock) { buffer.toString() }
+                    }
+                    val len = snapshot.length
                     val step = AssistantController.stepFor(len - shown)
                     var moved = 0
                     while (moved < step && shown < len) {
-                        val cp = text.codePointAt(shown)
+                        val cp = snapshot.codePointAt(shown)
                         shown += Character.charCount(cp)
                         moved++
                     }
-                    streamingText = text.substring(0, shown.coerceAtMost(text.length))
+                    streamingText = snapshot.substring(0, shown.coerceAtMost(len))
                     // Haptics belong to the conversation ON SCREEN only. Several turns can run at
                     // once now, and a background conversation's typewriter ticking the motor would
                     // keep the device vibrating for as long as it types — so a turn may only buzz
@@ -1493,11 +1508,19 @@ object AssistantController {
     // Wrapper keys some chat templates put around the call object itself.
     private val TOOL_WRAPPER_KEYS = arrayOf("tool_call", "function_call", "call", "tool", "function", "action")
 
+    // Compiled once: shared by resolveToolName and attemptedToolName below.
+    private val NAME_SEPARATORS = Regex("[\\s\\-]+")
+    private val SNAKE_CASE_NAME = Regex("^[a-z0-9]+(_[a-z0-9]+)+$")
+
+    // Compiled once: this scan runs on every reply a local model produces with tools enabled.
+    private val TOOL_CALL_TAG = Regex("(?s)<tool_call>(.*?)</tool_call>")
+    private val CODE_FENCE = Regex("(?s)```(?:json|tool_call)?\\s*(.*?)```")
+
     /** Peel `<tool_call>` tags and code fences off a model's output before scanning it for JSON. */
     private fun stripToolWrappers(raw: String): String {
         var s = raw.trim()
-        Regex("(?s)<tool_call>(.*?)</tool_call>").find(s)?.let { s = it.groupValues[1].trim() }
-        Regex("(?s)```(?:json|tool_call)?\\s*(.*?)```").find(s)?.let { s = it.groupValues[1].trim() }
+        TOOL_CALL_TAG.find(s)?.let { s = it.groupValues[1].trim() }
+        CODE_FENCE.find(s)?.let { s = it.groupValues[1].trim() }
         return s
     }
 
@@ -1510,7 +1533,7 @@ object AssistantController {
      * to feed an error back to the model rather than guessing at an action on the user's data.
      */
     private fun resolveToolName(rawName: String, valid: Set<String>): String? {
-        val n = rawName.trim().lowercase().replace(Regex("[\\s\\-]+"), "_").trim('_')
+        val n = rawName.trim().lowercase().replace(NAME_SEPARATORS, "_").trim('_')
         if (n.isBlank()) return null
         if (n in valid) return n
 
@@ -1583,7 +1606,7 @@ object AssistantController {
             for (k in TOOL_WRAPPER_KEYS) obj.optJSONObject(k)?.let { obj = it }
             val name = firstJsonString(obj, "tool", "name", "function", "action", "tool_name")?.trim()
             val hasArgs = firstJsonObject(obj, "arguments", "args", "parameters", "input", "params") != null
-            if (!name.isNullOrBlank() && (hasArgs || Regex("^[a-z0-9]+(_[a-z0-9]+)+$").matches(name))) return name
+            if (!name.isNullOrBlank() && (hasArgs || SNAKE_CASE_NAME.matches(name))) return name
             if (name.isNullOrBlank() && hasArgs) return "(unnamed)"
         }
         return null
@@ -1902,11 +1925,16 @@ object AssistantController {
     private fun isBareRefusal(s: String): Boolean {
         val t = s.trim()
         if (t.isEmpty() || t.length > 64) return false
-        val latin = t.lowercase().replace(Regex("[^a-z ]"), " ").replace(Regex("\\s+"), " ").trim()
-        if (Regex("^(sorry )?(but )?i (just )?(really )?(can ?no ?t|can ?t|cannot|am unable to|am not able to)\\b").containsMatchIn(latin)) return true
-        val cjk = arrayOf("我不能", "我无法", "无法完成", "做不到", "帮不了", "できません", "できかねます", "私にはできません", "할 수 없", "못해요", "못합니다")
-        return cjk.any { t.contains(it) }
+        val latin = t.lowercase().replace(NON_LATIN, " ").replace(MULTI_WHITESPACE, " ").trim()
+        if (REFUSAL_OPENER.containsMatchIn(latin)) return true
+        return CJK_REFUSALS.any { t.contains(it) }
     }
+
+    // Compiled/built once — isBareRefusal is consulted after every successful tool turn.
+    private val NON_LATIN = Regex("[^a-z ]")
+    private val MULTI_WHITESPACE = Regex("\\s+")
+    private val REFUSAL_OPENER = Regex("^(sorry )?(but )?i (just )?(really )?(can ?no ?t|can ?t|cannot|am unable to|am not able to)\\b")
+    private val CJK_REFUSALS = arrayOf("我不能", "我无法", "无法完成", "做不到", "帮不了", "できません", "できかねます", "私にはできません", "할 수 없", "못해요", "못합니다")
 
     /** A reply that's technically present but says nothing — the exact shapes issue 10 shows. */
     private fun isTerseNonAnswer(s: String): Boolean {
@@ -1928,20 +1956,31 @@ object AssistantController {
         var s = text
         // Bold/italic/code spans: keep the inner text, drop the markers. Non-greedy, must have
         // non-space content, so it won't eat across unrelated asterisks.
-        s = Regex("\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*").replace(s) { it.groupValues[1] }
-        s = Regex("(?<![\\w*])\\*(?=\\S)([^*\\n]+?)(?<=\\S)\\*(?![\\w*])").replace(s) { it.groupValues[1] }
-        s = Regex("__(?=\\S)(.+?)(?<=\\S)__").replace(s) { it.groupValues[1] }
-        s = Regex("(?<![\\w_])_(?=\\S)([^_\\n]+?)(?<=\\S)_(?![\\w_])").replace(s) { it.groupValues[1] }
-        s = Regex("`([^`\\n]+?)`").replace(s) { it.groupValues[1] }
+        s = BOLD_SPAN.replace(s) { it.groupValues[1] }
+        s = STAR_SPAN.replace(s) { it.groupValues[1] }
+        s = DUNDER_SPAN.replace(s) { it.groupValues[1] }
+        s = UNDERSCORE_SPAN.replace(s) { it.groupValues[1] }
+        s = CODE_SPAN.replace(s) { it.groupValues[1] }
         // Line-leading markdown: heading hashes and list bullets.
         s = s.lineSequence().joinToString("\n") { line ->
             var l = line
-            l = Regex("^\\s{0,3}#{1,6}\\s+").replace(l, "")
-            l = Regex("^\\s{0,3}[-*•]\\s+").replace(l, "")
+            l = HEADING_PREFIX.replace(l, "")
+            l = BULLET_PREFIX.replace(l, "")
             l
         }
         return s
     }
+
+    // Compiled once — deRobotify runs on every finished reply (and again on the stop/cancel
+    // paths). The two line-leading patterns used to be re-compiled for every LINE of every
+    // reply, which is the kind of thing a profiler notices on a long, chatty conversation.
+    private val BOLD_SPAN = Regex("\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*")
+    private val STAR_SPAN = Regex("(?<![\\w*])\\*(?=\\S)([^*\\n]+?)(?<=\\S)\\*(?![\\w*])")
+    private val DUNDER_SPAN = Regex("__(?=\\S)(.+?)(?<=\\S)__")
+    private val UNDERSCORE_SPAN = Regex("(?<![\\w_])_(?=\\S)([^_\\n]+?)(?<=\\S)_(?![\\w_])")
+    private val CODE_SPAN = Regex("`([^`\\n]+?)`")
+    private val HEADING_PREFIX = Regex("^\\s{0,3}#{1,6}\\s+")
+    private val BULLET_PREFIX = Regex("^\\s{0,3}[-*•]\\s+")
 
     private fun imageFileName(mime: String?): String = when {
         mime == null -> "image.png"

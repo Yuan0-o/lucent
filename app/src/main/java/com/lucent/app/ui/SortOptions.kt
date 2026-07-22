@@ -85,14 +85,20 @@ fun List<Note>.sortedForDisplay(sort: NoteSort, query: SearchQuery = SearchQuery
         NoteSort.TITLE_AZ -> compareBy { it.title.lowercase() }
     }
     val ranked = query.terms.isNotEmpty() || query.phrases.isNotEmpty()
-    val comparator = if (ranked) {
-        compareByDescending<Note> { it.pinned }
-            .thenByDescending { query.rank(it) }
-            .then(chosen)
-    } else {
-        compareByDescending<Note> { it.pinned }.then(chosen)
+    if (!ranked) {
+        return sortedWith(compareByDescending<Note> { it.pinned }.then(chosen))
     }
-    return sortedWith(comparator)
+    // Relevance is the expensive key here — rank() lowercases the note's title, tags, and whole
+    // body — and a comparator re-evaluates its key selector once per COMPARISON, i.e. O(n log n)
+    // times per sort, not once per note. On a few hundred notes that multiplied into thousands of
+    // full-body lowercase passes per keystroke. So: decorate (compute each note's rank exactly
+    // once), sort the pairs, undecorate. sortedWith is stable and the key order is unchanged
+    // (pinned, then rank, then the user's sort), so the resulting order is identical — only the
+    // amount of work changes.
+    val comparator = compareByDescending<Pair<Note, Int>> { it.first.pinned }
+        .thenByDescending { it.second }
+        .then(compareBy(chosen) { it.first })
+    return map { it to query.rank(it) }.sortedWith(comparator).map { it.first }
 }
 
 /** The same rule for tasks. See [sortedForDisplay] above for why the precedence is what it is. */
@@ -110,14 +116,17 @@ fun List<Task>.sortedForDisplay(sort: TaskSort, query: SearchQuery = SearchQuery
             .thenByDescending { it.createdAt }
     }
     val ranked = query.terms.isNotEmpty() || query.phrases.isNotEmpty()
-    val comparator = if (ranked) {
-        compareByDescending<Task> { it.pinned }
-            .thenByDescending { query.rank(it) }
-            .then(chosen)
-    } else {
-        compareByDescending<Task> { it.pinned }.then(chosen)
+    if (!ranked) {
+        return sortedWith(compareByDescending<Task> { it.pinned }.then(chosen))
     }
-    return sortedWith(comparator)
+    // Same decorate-sort-undecorate as the note version above — and it matters a little more here,
+    // because rank(task) also JSON-parses the subtask list, which comparator-driven re-evaluation
+    // was repeating O(n log n) times per sort. Ordering is byte-identical; each task is now ranked
+    // exactly once.
+    val comparator = compareByDescending<Pair<Task, Int>> { it.first.pinned }
+        .thenByDescending { it.second }
+        .then(compareBy(chosen) { it.first })
+    return map { it to query.rank(it) }.sortedWith(comparator).map { it.first }
 }
 
 /**

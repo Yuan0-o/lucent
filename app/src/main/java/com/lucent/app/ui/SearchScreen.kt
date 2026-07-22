@@ -132,9 +132,13 @@ fun SearchScreen(
                     limit = CANDIDATE_LIMIT
                 )
                 // SQL narrowed; Kotlin now enforces everything SQL can't say, and ranks what's left.
+                // Rank is computed once per candidate (decorate-sort-undecorate) rather than inside
+                // the comparator, where it would be re-evaluated O(n log n) times per sort.
                 .filter { query.matches(it) }
-                .sortedWith(compareByDescending<Note> { query.rank(it) }.thenByDescending { it.updatedAt })
+                .map { it to query.rank(it) }
+                .sortedWith(compareByDescending<Pair<Note, Int>> { it.second }.thenByDescending { it.first.updatedAt })
                 .take(RESULT_LIMIT)
+                .map { it.first }
         }
 
         taskResults = if (query.isNoteOnly) {
@@ -151,8 +155,11 @@ fun SearchScreen(
                     limit = CANDIDATE_LIMIT
                 )
                 .filter { query.matches(it, now) }
-                .sortedWith(compareByDescending<Task> { query.rank(it) }.thenByDescending { it.createdAt })
+                // Same one-rank-per-candidate treatment as the notes above.
+                .map { it to query.rank(it) }
+                .sortedWith(compareByDescending<Pair<Task, Int>> { it.second }.thenByDescending { it.first.createdAt })
                 .take(RESULT_LIMIT)
+                .map { it.first }
         }
         searching = false
     }
@@ -182,7 +189,7 @@ fun SearchScreen(
         // behaviour any chip should have. Previously each tap blindly appended the token, so a
         // second tap gave you "is:pinned is:pinned" instead of clearing it. The chip is shown as
         // selected while its token is present, so it always reflects the live query.
-        val activeTokens = remember(raw) { raw.split(Regex("\\s+")).filter { it.isNotBlank() }.toSet() }
+        val activeTokens = remember(raw) { raw.split(WHITESPACE).filter { it.isNotBlank() }.toSet() }
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -254,6 +261,9 @@ fun SearchScreen(
     }
 }
 
+/** Compiled once — the query is re-tokenised on every keystroke and every chip tap. */
+private val WHITESPACE = Regex("\\s+")
+
 /**
  * Add [token] to the query if it isn't already a standalone token, or remove it if it is — the
  * toggle behaviour behind the operator chips. Whitespace-delimited, so it acts on whole operators
@@ -262,7 +272,7 @@ fun SearchScreen(
  * leaves a trailing space so the user can keep typing.
  */
 internal fun toggleSearchToken(raw: String, token: String): String {
-    val parts = raw.split(Regex("\\s+")).filter { it.isNotBlank() }.toMutableList()
+    val parts = raw.split(WHITESPACE).filter { it.isNotBlank() }.toMutableList()
     val idx = parts.indexOf(token)
     if (idx >= 0) {
         parts.removeAt(idx)
