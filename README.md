@@ -223,3 +223,15 @@ notice and the licence text come along for the ride in any copy or substantial p
 so if you reuse Lucent, keep the `LICENSE` file (and the name on it) with what you ship, and we are
 square. The third-party components above make their own, similarly modest requests; honour those in
 the same spirit and everyone stays friends.
+
+## Contributing
+
+We welcome contributions! If you have suggestions or bug reports, please feel free to open an issue or submit a pull request. We strive to create an inclusive and welcoming community for everyone.
+
+## FAQ
+
+**Q: Is there an iOS version available?**
+A: Currently, Lucent is available for Android and Windows. We may explore iOS and macOS support in the future depending on demand and resources.
+
+**Q: Can I use this app entirely offline?**
+A: Yes! By importing a `.gguf` model, you can use the assistant locally without an internet connection. Web search and some cloud features won't be available, but core functionalities like managing notes and tasks work perfectly offline.
